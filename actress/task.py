@@ -45,6 +45,18 @@ class Stack:
         return len(stack.active) + len(stack.idle)
 
 
+
+def current() -> Generator[CurrentInstruction, Generator, Generator]:  # does the `Generator` object return a `Generator` object, I thought it returns nothing since it's just `yield CURRENT`
+    """
+    Get reference to current task.
+    """
+    return (yield CURRENT)
+
+
+def suspend() -> Generator[SuspendInstruction, None, None]:
+    yield SUSPEND
+
+
 # export type Instruction<T> = Message<T> | Control
 
 # export type Await<T> = T | PromiseLike<T>
