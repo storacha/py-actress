@@ -57,6 +57,99 @@ def suspend() -> Generator[SuspendInstruction, None, None]:
     yield SUSPEND
 
 
+def enqueue(task: Task, stack: Stack) -> None:
+    """
+    Add a task to the active queue.
+    """
+    if task in stack.idle:
+        print(stack.idle)
+        stack.idle.remove(task)
+    stack.active.append(task)
+    return
+
+
+def resume(task: Task, stack: Stack) -> None:
+    """
+    Resume a suspended task.
+    """
+    enqueue(task, stack)
+    return
+
+
+def step(stack: Stack) -> Generator[Any, Any, None]:
+    """
+    Execute one step of the scheduler.
+
+    This is a GENERATOR that:
+    - Processes tasks from stack.active
+    - Handles SUSPEND and CURRENT control instructions internally
+    - YIELDS regular messages to the caller
+    """
+    active = stack.active
+    current_task = active[0] if active else None
+
+    if current_task:
+        stack.idle.discard(current_task)
+
+    while current_task:
+        # get initial instruction for this task
+        try:
+            instruction = next(current_task)
+        except StopIteration:
+            # task completed before any other instruction
+            active.popleft()
+            current_task = active[0] if active else None
+            if current_task:
+                stack.idle.discard(current_task)
+            continue
+
+        # Track if task is done (for re-enqueueing logic)
+        task_done = False
+
+        # Inner loop to process instructions from this task
+        while current_task is active[0]:
+            if instruction is SUSPEND:
+                stack.idle.add(current_task)
+                break
+
+            elif instruction is CURRENT:
+                try:
+                    instruction = current_task.send(current_task)
+                    continue
+                except StopIteration:
+                    # task completed
+                    task_done = True
+                    break
+
+            else:
+                yield instruction
+                break  # Exit inner loop, give other tasks a turn
+
+        removed_task = active.popleft()
+
+        # If task yielded a message (not suspended, not done), re-add to back
+        if removed_task not in stack.idle and not task_done:
+            # Task yielded a message - re-add to back of queue -- cooperative multitasking
+            active.append(removed_task)
+
+        current_task = active[0] if active else None
+
+        if current_task:
+            stack.idle.discard(current_task)
+
+
+def main(task: Task) -> Any:
+    """
+    Run a single task to completion.
+    """
+    stack = Stack()
+    enqueue(task, stack)
+
+    for _ in step(stack): pass
+
+    return None
+
+
 # export type Instruction<T> = Message<T> | Control
 
 # export type Await<T> = T | PromiseLike<T>
