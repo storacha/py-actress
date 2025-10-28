@@ -1,33 +1,22 @@
 from typing import Generator, Literal, TypeVar, Union
 
 
-class Symbol(object):
-    """Symbolic global constant"""
-
-    __slots__ = ["_name", "_module"]
-    __name__ = property(lambda s: s._name)
-    __module__ = property(lambda s: s._module)
-
-    def __init__(self, symbol, moduleName):
-        self.__class__._name.__set__(self, symbol)
-        self.__class__._module.__set__(self, moduleName)
-
-    def __reduce__(self):
-        return self._name
-
-    def __setattr__(self, attr, val):
-        raise TypeError("Symbols are immutable")
-
-    def __repr__(self):
-        return self.__name__
-
-    __str__ = __repr__
+class CurrentInstruction:
+    def __repr__(self) -> str:
+        return f'<CURRENT>'
 
 
-CURRENT = Symbol("current")
-SUSPEND = Symbol("suspend")
+class SuspendInstruction:
+    def __repr__(self) -> str:
+        return f'<SUSPEND>'
 
-Control = Union[CURRENT, SUSPEND]
+
+# Special control instructions recognized by the scheduler.
+CURRENT = CurrentInstruction()
+SUSPEND = SuspendInstruction()
+
+Control = Union[CurrentInstruction, SuspendInstruction]
+
 
 # export type Instruction<T> = Message<T> | Control
 
@@ -100,7 +89,7 @@ TaskState = Union[Success, Message]
 
 class Task[Success, Message, Failure]:
     # def __iter__(): Controller[Success, Message, Failure]
-    def __iter__():
+    def __iter__(self):
         Generator[
             Union[Success, Message],
             Task[Success, Message, Failure],
