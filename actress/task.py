@@ -1,4 +1,5 @@
-from typing import Generator, Literal, TypeVar, Union
+from typing import Any, Generator, Literal, TypeVar, Union, Deque, Optional, Set
+from collections import deque
 
 
 class CurrentInstruction:
@@ -11,11 +12,37 @@ class SuspendInstruction:
         return f'<SUSPEND>'
 
 
+T = TypeVar('T')
+X = TypeVar('X')
+M = TypeVar('M')
+
+
 # Special control instructions recognized by the scheduler.
 CURRENT = CurrentInstruction()
 SUSPEND = SuspendInstruction()
 
 Control = Union[CurrentInstruction, SuspendInstruction]
+Instruction = Union[Control, M]
+Task = Generator[Instruction[M], Any, T]
+
+
+class Stack:
+    """
+    Manages two collection of tasks:
+    - active: FIFO Queue of tasks ready to run 
+    - idle: Set of suspended tasks (order not necessary)
+    """
+
+    def __init__(self, active: Optional[Deque[Task]] = None, idle: Optional[Set[Task]] = None):
+        self.active = active or deque([])
+        self.idle = idle or set()
+
+    @staticmethod
+    def size(stack: 'Stack') -> int:
+        """
+        Get total number of tasks (active + idle).
+        """
+        return len(stack.active) + len(stack.idle)
 
 
 # export type Instruction<T> = Message<T> | Control
@@ -77,24 +104,24 @@ Control = Union[CurrentInstruction, SuspendInstruction]
 #   [Symbol.iterator](): Controller<Success, Failure, Message>
 # }
 
-Success = TypeVar("Success")
-Failure = TypeVar("Failure")
-Message = TypeVar("Message")
-
-TaskState = Union[Success, Message]
+# Success = TypeVar("Success")
+# Failure = TypeVar("Failure")
+# Message = TypeVar("Message")
+#
+# TaskState = Union[Success, Message]
 
 # Generator[yield_type, send_type, return_type]
 # Generator<T = unknown, TReturn = any, TNext = any>
 
 
-class Task[Success, Message, Failure]:
-    # def __iter__(): Controller[Success, Message, Failure]
-    def __iter__(self):
-        Generator[
-            Union[Success, Message],
-            Task[Success, Message, Failure],
-            Union[Success, Message],
-        ]
+# class Task[Success, Message, Failure]:
+#     # def __iter__(): Controller[Success, Message, Failure]
+#     def __iter__(self):
+#         Generator[
+#             Union[Success, Message],
+#             Task[Success, Message, Failure],
+#             Union[Success, Message],
+#         ]
 
 
 # class Controller[Success, Message, Failure](Generator[Union[Success, Message], Task[Success, Message, Failure], Union[Success, Message]]):
