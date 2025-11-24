@@ -38,7 +38,7 @@ def test_primitives():
     print("="*70)
 
     def task():
-        ref = yield from current()
+        ref = yield from current()  # `current()` returns a coroutine: `yield CURRENT`
         print(f"Got reference: {ref}")
         yield from suspend()
         print("This should not print (task is suspended)")

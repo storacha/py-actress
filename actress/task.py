@@ -1,5 +1,6 @@
-from typing import Any, Generator, Literal, TypeVar, Union, Deque, Optional, Set
+from typing import Any, Generator, Literal, TypeVar, Union, Deque, Optional, Set, List
 from collections import deque
+import asyncio
 
 
 class CurrentInstruction:
@@ -96,7 +97,7 @@ def step(stack: Stack) -> Generator[Any, Any, None]:
         try:
             instruction = next(current_task)
         except StopIteration:
-            # task completed before any other instruction
+            # task completed before any other instruction, add other tasks
             active.popleft()
             current_task = active[0] if active else None
             if current_task:
@@ -136,6 +137,121 @@ def step(stack: Stack) -> Generator[Any, Any, None]:
 
         if current_task:
             stack.idle.discard(current_task)
+
+
+def sleep(duration: float, stack: Stack) -> Generator[Any, Any, None]:
+    """
+    /**
+     * Suspends execution for the given duration in milliseconds, after which
+     * execution is resumed (unless it was aborted in the meantime).
+     *
+     * Args:
+     *  duration: Time to sleep in seconds
+     *  stack: The stack this task belongs to
+     *
+     * Example:
+     *  def my_task():
+     *      print("Starting")
+     *      yield from sleep(0.1, stack)
+     *      print("After 100ms")
+     */
+    """
+    task_ref = yield from current()
+
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    handle = loop.call_later(duration, lambda: resume(task_ref, stack))
+
+    try:
+        yield from suspend()
+    finally:
+        handle.cancel()
+
+
+
+def wait(input_value: Union[T, Any], stack: Stack) -> Generator[Any, Any, Any]:
+    """
+    /**
+     * Provides equivalent of `await` in async functions. Specifically it takes
+     * a value that you can `await` on (that is `Promise<T>|T`) and suspends
+     * execution until promise is settled. If promise succeeds execution is resumed
+     * with `T` otherwise an error of type `X` is thrown (which is by default
+     * `unknown` since promises do not encode error type).
+     *
+     * It is useful when you need to deal with potentially async set of operations
+     * without having to check if thing is a promise at every step.
+     *
+     * Please note: This that execution is suspended even if given value is not a
+     * promise, however scheduler will still resume it in the same tick of the event
+     * loop after, just processing other scheduled tasks. This avoids problematic
+     * race condititions that can otherwise occur when values are sometimes promises
+     * and other times are not.
+     *
+     *
+     *  Args:
+     *      input_value: A value or awaitable to wait on
+     *      stack: The stack this task belongs to
+     *
+     *  Returns:
+     *      The resolved value
+     *
+     *  Raises:
+     *      Exception if the future fails
+     *
+     *
+     *  Example:
+     *      async def fetch_data():
+     *          await asyncio.sleep(0.1)
+     *          return "data"
+     *
+     *      def my_task():
+     *          future = fetch_data()
+     *          result = yield from wait(future, stack)
+     *          print(f"Got: {result}")
+     */
+    """
+    task_ref = yield from current()
+
+    if asyncio.isfuture(input_value) or asyncio.iscoroutine(input_value):
+        failed = [False]
+        output: List[Optional[Exception]] = [None]
+        async def handle_async():
+            try:
+                result = await input_value
+                failed[0] = False
+                output[0] = result
+                enqueue(task_ref, stack)  # Resume task
+            except Exception as error:
+                failed[0] = True
+                output[0] = error
+                enqueue(task_ref, stack)  # Resume even on error
+        # Get or create event loop, then schedule task
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        # Use ensure_future to schedule the coroutine to run when the event loop starts,
+        # which works even when loop is not running unlike `asyncio.create_task()`
+        asyncio.ensure_future(handle_async(), loop=loop)
+
+        yield from suspend()
+        if failed[0] and isinstance(output[0], Exception):
+            raise output[0]
+        else:
+            return output[0]
+    else:
+        def wake():
+            resume(task_ref, stack)
+            yield
+        enqueue(wake(), stack)
+        yield from suspend()
+        return input_value
 
 
 def main(task: Task) -> Any:
