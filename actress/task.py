@@ -26,6 +26,14 @@ Control = Union[CurrentInstruction, SuspendInstruction]
 Instruction = Union[Control, M]
 Task = Generator[Instruction[M], Any, T]
 
+# Task ID counter
+_task_id_counter = 0
+
+def _next_task_id() -> int:
+    """Generate unique task IDs."""
+    global _task_id_counter
+    _task_id_counter += 1
+    return _task_id_counter
 
 class Stack:
     """
@@ -252,6 +260,205 @@ def wait(input_value: Union[T, Any], stack: Stack) -> Generator[Any, Any, Any]:
         enqueue(wake(), stack)
         yield from suspend()
         return input_value
+
+
+
+class Fork:
+    """
+    A handle to a running task.
+
+    The Fork class:
+    - Wraps a task generator
+    - Tracks its status (idle/active/finished)
+    - Stores its result when complete
+    - Implements the generator protocol (so it can be run by scheduler)
+    Key attributes:
+    - id: Unique task ID
+    - task: The generator function (not started yet)
+    - controller: The generator iterator (when activated)
+    - status: "idle" | "active" | "finished"
+    - result: None or {"ok": bool, "value": Any, "error": Any}
+    - stack: The stack this fork belongs to
+    - waiting_tasks: List of tasks waiting for this fork via join()
+    """
+
+    def __init__(self, task: Task, stack: Stack):
+        self.id = _next_task_id()
+        self.task = task
+        self.controller = None  # will be set when activated
+        self.status = "idle"
+        self.result: dict[str, Any] = None  # type: ignore
+        self.stack = stack
+        self.waiting_tasks = []  # suspended tasks waiting on `self` to finish
+
+    def activate(self):
+        """
+        Start the task.
+        """
+        self.controller = self.task
+        self.status = "active"
+        enqueue(self, self.stack)  # type: ignore
+        return self
+
+
+    def __iter__(self):
+        """
+        Makes Fork itself an iterator.
+
+        When you do: yield from fork_handle
+        This method is called, which activates the fork.
+        """
+        # prevent activating a completed task
+        if self.status == "finished":
+            return self
+        return self.activate()
+
+    def __next__(self):
+        """
+        Generator protocol: Get next value from task.
+
+        This is called by the scheduler to run the fork.
+        """
+        # prevent activating a completed task
+        if self.status == "finished":
+            # this returns the `Fork()` obj as a 
+            raise StopIteration(self)
+        try:
+            value = next(self.controller)  # type: ignore
+            return value
+        except StopIteration as e:
+            self.status = "finished"
+            self.result = {"ok": True, "value": e.value}
+            for task in self.waiting_tasks:
+                enqueue(task, self.stack)
+            raise StopIteration(self)
+        except Exception as e:
+            self.status = "finished"
+            self.result = {"ok": False, "error": e}
+            for task in self.waiting_tasks:
+                enqueue(task, self.stack)
+            raise StopIteration(self)
+
+    def send(self, value: Any):
+        """
+        Generator protocol: Send a value to the task.
+
+        Similar to __next__, but sends a value.
+        """
+        if self.status == "finished":
+            raise StopIteration(self)
+        try:
+            task_result_val = self.controller.send(value)  # type: ignore
+            return task_result_val
+        except StopIteration as e:
+            self.status = "finished"
+            self.result = {"ok": True, "value": e.value}
+            for task in self.waiting_tasks:
+                enqueue(task, self.stack)
+            raise StopIteration(self)
+        except Exception as e:
+            self.status = "finished"
+            self.result = {"ok": False, "error": e}
+            for task in self.waiting_tasks:
+                enqueue(task, self.stack)
+            raise StopIteration(self)
+
+    def throw(self, error: Exception):
+        """
+        Generator protocol: Throw an error into the task.
+        """
+        if self.status == "finished":
+            raise StopIteration(self)
+        try:
+            value = self.controller.throw(error)  # type: ignore
+        except StopIteration as e:
+            # task completed (either successfully or not)
+            self.status = "finished"
+            self.result = {"ok": True,  "value": e.value}
+            for task in self.waiting_tasks:
+                enqueue(task, self.stack)
+            raise StopIteration(self)
+        except Exception as e:
+            self.status = "finished"
+            self.result = {"ok": False, "error": e}
+            for task in self.waiting_tasks:
+                enqueue(task, self.stack)
+            raise StopIteration(self)
+
+def fork(task: Task, stack: Stack) -> Fork:
+    """
+    /**
+     * Executes given task concurrently with current task (the task that initiated
+     * fork). Froked task is detached from the task that created it and it can
+     * outlive it and / or fail without affecting it. You do however get a handle
+     * for the fork which could be used to `join` the task, in which case `joining`
+     * task will block until fork finishes execution.
+     *
+     * This is also a primary interface for executing tasks from the outside of the
+     * task context. Function returns `Fork` which implements `` interface
+     * so it could be awaited. Please note that calling `fork` does not really do
+     * anything, it lazily starts execution when you either `await fork(work())`
+     * from arbitray context or `yield from fork(work())` in another task context.
+     *
+     *  Args:
+     *      task: The generator to run
+     *      stack: The stack to run it in
+     *
+     *  Returns:
+     *      Fork handle
+     *
+     *  Example:
+     *      def parent():
+     *          # Start concurrent task
+     *          worker = yield from fork(worker_task(), stack)
+     *
+     *           # Do other work
+     *           yield from sleep(1.0, stack)
+     *
+     *          # Wait for worker
+     *          result = yield from join(worker, stack)
+     */
+    """
+    return Fork(task, stack)
+
+def join(fork_handle: Fork, stack: Stack) -> Generator[Any, Any, Any]:
+    """
+    Wait for a forked task to complete and get its result.
+
+    Args:
+        fork_handle: The Fork to wait for
+        stack: The stack
+
+    Returns:
+        The result value from the forked task
+
+    Raises:
+        Exception if the forked task failed
+
+    Example:
+        def parent():
+            worker = yield from fork(worker_task(), stack)
+            result = yield from join(worker, stack)  # Waits here
+            print(f"Worker returned: {result}")
+    """
+    # incase the task that is being forked (or handled) suspends, preventing `join`
+    # from running after delegation (e.g by using `yield from sleep()`), thereby
+    # preventing the task from enqueuing or resuming the parent (`parent_task_ref`)
+    # when its done.
+    parent_task_ref = yield from current()
+    fork_handle.waiting_tasks.append(parent_task_ref)
+
+    if fork_handle.status == "idle":
+        yield from fork_handle
+
+    if fork_handle.status != "finished":
+        yield from suspend()
+
+    # At this point fork_handle.result must be set; return or raise accordingly.
+    if fork_handle.result["ok"]:
+        return fork_handle.result["value"]
+    else:
+        raise fork_handle.result["error"]
 
 
 def main(task: Task) -> Any:
