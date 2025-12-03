@@ -580,6 +580,51 @@ def group(forks: List[Fork]) -> Generator[Any, Any, Any]:
         raise e
 
 
+def conclude(handle: Task, result: dict) -> Generator[Any, Any, None]:
+    """
+    Force a task to conclude with the given result.
+    """
+    try:
+        if result["ok"]:
+            instruction = handle.send(result["value"])
+        else:
+            instruction = handle.throw(result["error"])
+
+        group = Group.of(handle)
+        if instruction is SUSPEND:
+            group.stack.idle.add(handle)
+        elif instruction is not None:
+            enqueue(handle, group.stack)
+    except Exception:
+        # swallow exceptions from conclude; target task may have handled/finished
+        ...
+    yield
+
+
+def abort(handle: Task, error=None) -> Generator[Any, Any, None]:
+    """
+    Abort a task with an error.
+    """
+    yield from conclude(handle, {"ok": False, "error": error})
+    yield
+
+
+def exit_task(handle: Task, value) -> Generator[Any, Any, None]:
+    """
+    Exit a task successfully with the given value.
+    """
+    yield from conclude(handle, {"ok": True, "value": value})
+    yield
+
+
+def terminate(handle: Task) -> Generator[Any, Any, None]:
+    """
+    Terminate a task (void return).
+    """
+    yield from conclude(handle, {"ok": True, "value": None})
+    yield
+
+
 def main(task: Task) -> Any:
     """
     Run a single task to completion.
