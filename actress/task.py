@@ -55,7 +55,7 @@ class Stack:
 
 
 
-def current() -> Generator[CurrentInstruction, Generator, Generator]:  # does the `Generator` object return a `Generator` object, I thought it returns nothing since it's just `yield CURRENT`
+def current() -> Generator[CurrentInstruction, Generator, Generator]:
     """
     Get reference to current task.
     """
@@ -290,6 +290,7 @@ class Fork:
         self.result: dict[str, Any] = None  # type: ignore
         self.stack = stack
         self.waiting_tasks = []  # suspended tasks waiting on `self` to finish
+        self.group: Optional[Group] = None
 
     def activate(self):
         """
@@ -385,6 +386,7 @@ class Fork:
                 enqueue(task, self.stack)
             raise StopIteration(self)
 
+
 def fork(task: Task, stack: Stack) -> Fork:
     """
     /**
@@ -459,6 +461,123 @@ def join(fork_handle: Fork, stack: Stack) -> Generator[Any, Any, Any]:
         return fork_handle.result["value"]
     else:
         raise fork_handle.result["error"]
+
+
+class Group:
+    _id_counter = 0
+
+    def __init__(
+        self,
+        driver: Optional[Task],
+        active: Optional[Deque[Task | "Fork"]] = None,
+        idle: Optional[Set[Task | "Fork"]] = None,
+        stack: Optional[Stack] = None
+    ):
+        Group._id_counter += 1
+        self.id = Group._id_counter
+        self.driver = driver
+        self.parent = Group.of(driver) if driver is not None else None
+        self.stack = stack if stack is not None else Stack(active, idle)
+
+    @staticmethod
+    def of(member: Union[Task, "Fork"]) -> "Group":
+        """
+        Return the group a task/fork belongs to (or MAIN_GROUP if none).
+        """
+        group = getattr(member, "group", None)
+        return group if group is not None else MAIN_GROUP
+
+    @staticmethod
+    def enqueue(member: "Fork", group: "Group"):
+        """
+        Attach a task/fork to a group and put it on the group's active queue.
+        """
+        member.group = group
+        group.stack.active.append(member)
+
+
+# Singleton main group used when no explicit group is assigned
+MAIN_GROUP = Group(driver=None, stack=Stack())  # type: ignore[arg-type]
+MAIN_GROUP.parent = None
+
+
+def move(fork_handle: Fork, target_group: Group):
+    """
+    Move a fork from its current group to target_group.
+    """
+    source_group = Group.of(fork_handle)
+    if source_group == target_group:
+        return
+
+    fork_handle.group = target_group
+
+    if fork_handle in source_group.stack.active:
+        source_group.stack.active.remove(fork_handle)
+        target_group.stack.active.append(fork_handle)
+    elif fork_handle in source_group.stack.idle:
+        source_group.stack.idle.remove(fork_handle)
+        target_group.stack.idle.add(fork_handle)
+    else:
+        return
+
+    # in the js reference, removing from the old active queue uses array
+    # indices; their comment warns about the currently-running task being at
+    # index 0, so step() must notice group changes to avoid double-driving. our
+    # deque/remove approach here is equivalent in this simplified scheduler.
+
+
+def group(forks: List[Fork]) -> Generator[Any, Any, Any]:
+    """
+    Join multiple forks into the current task using a new group.
+
+    Algorithm sketch (match JS group()):
+    1. If no forks, return immediately.
+    2. Get current task (driver) via current().
+    3. Create a new Group(driver).
+    4. For each fork:
+       - If fork already has result, track first failure (if any).
+       - Else move(fork, new_group).
+    5. If a failure was found, raise it.
+    6. Loop: run step(new_group.stack) once; if Stack.size(new_group.stack) > 0,
+       suspend current task so other tasks can run; else break.
+       (This is similar to milestone5 group, but uses Group/Stack from above.)
+    7. If an error occurs during the loop, re-raise it.
+    """
+    if len(forks) == 0: return
+
+    current_task = yield from current()
+    group = Group(current_task)
+
+    failure = None
+
+    for fork in forks:
+        if fork.result is not None:
+            # If a fork already finished (before grouping), record the first
+            # failure so we can raise without running the loop.
+            if not fork.result["ok"]:
+                failure = fork.result
+            continue
+        fork.activate()
+        move(fork, group)
+
+    try:
+        if failure:
+            raise failure["error"]
+        while True:
+            yield from step(group.stack)
+
+            if Stack.size(group.stack) > 0:
+                yield from suspend()
+            else:
+                break
+
+        # Propagate any failure that occurred while running the group.
+        for f in forks:
+            if f.result is not None and not f.result["ok"]:
+                raise f.result["error"]
+
+    except Exception as e:
+        raise e
 
 
 def main(task: Task) -> Any:
