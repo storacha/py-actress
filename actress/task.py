@@ -1,7 +1,8 @@
 from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Awaitable, Generic, List, Literal, NoReturn, Optional, Set, TypeGuard, TypeVar, TypedDict, Union, cast, Callable, Generator, overload
+from typing import Any, Generic, Literal, NoReturn, Optional, TypeVar, TypedDict, Union, cast, overload
+from collections.abc import Awaitable, Generator, Callable
 from enum import Enum
 from typing_extensions import TypeAlias
 
@@ -12,12 +13,12 @@ M = TypeVar("M")  # message yielded by task
 
 class CurrentInstruction:
     def __repr__(self) -> str:
-        return f'<CURRENT>'
+        return '<CURRENT>'
 
 
 class SuspendInstruction:
     def __repr__(self) -> str:
-        return f'<SUSPEND>'
+        return '<SUSPEND>'
 
 
 # Special control instructions recognized by the scheduler.
@@ -26,8 +27,8 @@ SUSPEND = SuspendInstruction()
 
 Control: TypeAlias = Union[CurrentInstruction, SuspendInstruction]
 Instruction: TypeAlias = Union[Control, M]
-Controller: TypeAlias = Generator[Instruction, Any, T]
-Task: TypeAlias = Controller  # In python the generator object is also the iterator
+Controller: TypeAlias = Generator[Union[Control, M], Any, T]
+Task: TypeAlias = Generator[Union[Control, M], Any, T]  # In python the generator object is also the iterator
 """
 Task is a unit of computation that runs concurrently, a light-weight
 process (in Erlang terms). You can spawn bunch of them and provided
@@ -92,8 +93,8 @@ class Stack(Generic[T, X, M]):
     """Stack of active and idle tasks"""
     def __init__(
         self,
-        active: Optional[List[ControllerFork[M, T, X]]] = None,
-        idle: Optional[Set[ControllerFork[M, T, X]]] = None
+        active: Optional[list[ControllerFork[T, X, M]]] = None,
+        idle: Optional[set[ControllerFork[T, X, M]]] = None
     ) -> None:
         # gymnastics to align with reference JS implementation without sacrificing
         # safety. Using mutable types as default args in Python can lead to weird errors
@@ -101,8 +102,8 @@ class Stack(Generic[T, X, M]):
         # time the function is called.
         active_eval = active if active is not None else []
         idle_eval = idle if idle is not None else set()
-        self.active = active_eval
-        self.idle = idle_eval
+        self.active: list[ControllerFork[T, X, M]] = active_eval
+        self.idle: set[ControllerFork[T, X, M]] = idle_eval
 
     @staticmethod
     def size(stack: Stack[T, X, M]) -> int:
@@ -122,7 +123,7 @@ def is_async(node: Any) -> bool:
         return True
     return False
 
-def sleep(duration: float = 0) -> Generator[Control, Controller, None]:
+def sleep(duration: float = 0) -> Task[Control, None]:
     """
     Suspends execution for the given duration in milliseconds, after which execution
     is resumed (unless it was aborted in the meantime).
@@ -139,11 +140,7 @@ def sleep(duration: float = 0) -> Generator[Control, Controller, None]:
     ```
     """
     task = yield from current()
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    loop = asyncio.get_running_loop()
 
     # convert duration to millisecs
     handle = loop.call_later(duration/1000, lambda: enqueue(task))
@@ -154,12 +151,12 @@ def sleep(duration: float = 0) -> Generator[Control, Controller, None]:
         handle.cancel()
 
 @overload
-def wait(input: Awaitable[T]) -> Generator[Control, Any, T]: ...
+def wait(input: Awaitable[T]) -> Task[Control, T]: ...
 
 @overload
-def wait(input: T) -> Generator[Control, Any, T]: ...
+def wait(input: T) -> Task[Control, T]: ...
 
-def wait(input: Awaitable[T] | T) -> Generator[Control, Any, T]:
+def wait(input: Union[Awaitable[T], T]) -> Task[Control, T]:
     """
     Provides equivalent of `await` in async functions. Specifically it takes a value
     that you can `await` on (that is `[T]`, i.e futures, coroutines) and suspends
@@ -226,15 +223,21 @@ def wait(input: Awaitable[T] | T) -> Generator[Control, Any, T]:
         # scheduler to perform other queued tasks first. This way many race conditions
         # can be avoided when values are sometimes promises and other times aren't.
         # unlike `await` however this will resume in the same tick.
-        main(wake(task))
-        yield from suspend()
-        return input
 
-def wake(task: Task) -> Generator[None, None, None]:
+        # To ensure behavioural consistency in sync/async values of `input`, suspension
+        # of task happens immediately while `enqueue(task)` runs async after `wake`
+        # task is itself `enqueueed` into the `Main` group within the `main()` function.
+        # similar to how when `input` is `Awaitable` and current task (or context) is
+        # suspended immediately and other tasks run, while `input` is `awaited`.
+        main(wake(task))
+        yield from suspend()  # suspension happens immediately
+        return cast(T, input)
+
+def wake(task: Task[M, T]) -> Task[None, None]:
     enqueue(task)
     yield
 
-def main(task: Generator[None, None, None]) -> None:
+def main(task: Task[None, None]) -> None:
     """
     Starts a main task.
 
@@ -244,7 +247,7 @@ def main(task: Generator[None, None, None]) -> None:
     controller = iter(task)
     enqueue(controller)  # controller == iterator
 
-def is_message(value: Instruction) -> bool:
+def is_message(value: Instruction[M]) -> bool:
     if value is SUSPEND or value is CURRENT:
         return False
     return True
@@ -255,27 +258,26 @@ class Fork(Generic[T, X, M]):
 
     def __init__(
         self,
-        task: Task,
+        task: Task[M, T],
         handler: StateHandler[T, X] = StateHandler(),
         options: ForkOptions = ForkOptions(name=None),
     ) -> None:
         self.handler= handler
-        Fork.ID += 1
-        self.id = Fork.ID
+        self.id += ID
         self.name = options.get('name', None) or ""
         self.task = task
-        self.state: Optional[Union[Instruction, StopIteration]] = None
+        self.state: Optional[Union[Instruction[M], StopIteration]] = None
         self.status = Status.IDLE
         self.result: Optional[Result[T, X]] = None
-        self.controller: Optional[Controller] = None
+        self.controller: Optional[Controller[M, T]] = None
         self.group: Optional[Group[T, X, M]] = None
 
 
-    def resume(self) -> Generator[None, None, None]:
+    def resume(self) -> Task[None, None]:
         resume(self)
         yield
 
-    def join(self):
+    def join(self) -> Task[Optional[M], T]:
         return join(self)
 
     def abort(self, error: X):
@@ -297,7 +299,7 @@ class Fork(Generic[T, X, M]):
             self.handler.onfailure(error)
         raise error
 
-    def _step(self, state: Union[Instruction, StopIteration]) -> None:
+    def _step(self, state: Union[Instruction[M], StopIteration]) -> None:
         self.state = state
         #`StopIteration` signifies end of a generator in Python and holds its return
         # value on success
@@ -314,7 +316,7 @@ class Fork(Generic[T, X, M]):
         # returning it is even more pointless when you realize `StopIteration` is caught
         # and then `re-raised` just after calling `_step`.
 
-    def __next__(self) -> Instruction:
+    def __next__(self) -> Instruction[M]:
         try:
             # note that: `task.send(None) == next(task)`
             # also cast the type for `self.controller` to eliminate the type-checker
@@ -331,7 +333,7 @@ class Fork(Generic[T, X, M]):
         except Exception as e:
             return self._panic(e)  # type: ignore[arg-type]
 
-    def send(self, value: Any) -> Instruction:
+    def send(self, value: Any) -> Instruction[M]:
         try:
             # cast the type for `self.controller` to eliminate the type-checker
             # from inferring that `self.controller` is still `None` after fork
@@ -347,7 +349,7 @@ class Fork(Generic[T, X, M]):
         except Exception as e:
             return self._panic(e)  # type: ignore[arg-type]
 
-    def throw(self, error: Union[Exception, GeneratorExit]) -> Instruction:
+    def throw(self, error: Union[Exception, GeneratorExit]) -> Instruction[M]:
         try:
             # also cast the type for `self.controller` to eliminate the type-checker
             # from inferring that `self.controller` is still `None` after fork
@@ -394,7 +396,7 @@ class Main(Generic[T, X, M]):
         self.status = Status.IDLE
         self.stack = Stack()
         self.id: Literal[0] = 0
-        self.parent: Optional["TaskGroup"] = None
+        self.parent: Optional[TaskGroup[T, X, M]] = None
 
 
 MAIN = Main()
@@ -407,21 +409,31 @@ class TaskGroup(Generic[T, X, M]):
 
     def __init__(
         self,
-        driver: ControllerFork[M, T, X],
-        active: Optional[List[ControllerFork[M, T, X]]] = None,
-        idle: Optional[Set[ControllerFork[M, T, X]]] = None,
-        stack: Optional[Stack] = None
+        driver: ControllerFork[T, X, M],
+        active: Optional[list[ControllerFork[T, X, M]]] = None,
+        idle: Optional[set[ControllerFork[T, X, M]]] = None,
+        stack: Optional[Stack[T, X, M]] = None
     ) -> None:
         self.driver = driver
         self.parent = TaskGroup.of(driver)
+
+        # gymnastics to align with reference JS implementation without sacrificing
+        # safety. Using mutable types as default args in Python can lead to weird errors
+        # that arise from a shared state created at definition time as opposed to each
+        # time the function is called.
         active_eval = active if active is not None else []
         idle_eval = idle if idle is not None else set()
-        self.stack = stack if (active or idle) else Stack(active_eval, idle_eval)
-        TaskGroup.ID += 1
-        self.id = TaskGroup.ID
+        if active is not None or idle is not None:
+            self.stack = Stack(active_eval, idle_eval)
+        elif stack is not None:
+            self.stack = stack
+        else:
+            self.stack = Stack()
+
+        self.id += ID
 
     @staticmethod
-    def of(member: ControllerFork[M, T, X]) -> "Group[T, X, M]":
+    def of(member: ControllerFork[T, X, M]) -> Group[T, X, M]:
         # since `Generator` objects dont have the `group` attribute if `member`
         # is not a `Fork` then it's group is the default `MAIN` group
         group = getattr(member, 'group', None)
@@ -429,44 +441,25 @@ class TaskGroup(Generic[T, X, M]):
 
 
     @staticmethod
-    def enqueue(member: TaskFork[M, T, X], group: "TaskGroup[T, X, M]") -> None:
+    def enqueue(member: TaskFork[T, X, M], group: TaskGroup[T, X, M]) -> None:
         member.group = group  # type: ignore[attr-defined]
         group.stack.active.append(member)
 
 
 Group = Union[TaskGroup[T, X, M], Main[T, X, M]]
 
-def enqueue(task: ControllerFork[M, T, X]) -> None:
-    """
-    Each `step()` only knows about ONE group's tasks.
-
-    The hierarchy is connected through:
-    1. Driver tasks that explicitly call step(childGroup)
-    2. enqueue walking up to resume suspended drivers
-    3. Drivers acting as intermediaries between parent scheduler and child tasks
-
-    This design gives you:
-    - Isolation: Each group's scheduler logic is simple
-    - Composition: Groups can nest arbitrarily deep
-    - Explicit control: Drivers decide when to run child tasks
-
-    When MAIN runs step(MAIN), it processes the groupDriver task.
-    The groupDriver task's body contains `yield from step(childGroup)`.
-    So the parent's step() → runs driver → driver calls child's step() → processes child tasks.
-
-    It's recursive through the driver tasks, not through step() itself!
-    """
+def enqueue(task: ControllerFork[T, X, M]) -> None:
     group = TaskGroup.of(task)
 
     group.stack.active.append(task)
-    group.stack.idle.remove(task)
+    group.stack.idle.discard(task)
 
     # then walk up the group chain and unblock their driver tasks
     while group.parent is not None:
         idle = group.parent.stack.idle
         active = group.parent.stack.active
 
-        # only to appease type checkers, since `MAIN` doesn't have a driver. and `MAIN`
+        # only to appease type checkers, since `MAIN` doesn't have a driver and `MAIN`
         # has a parent of `None` so this loop won't run in that case
         driver = getattr(group, "driver", None)
         if driver is not None and driver in idle:
@@ -485,8 +478,9 @@ def enqueue(task: ControllerFork[M, T, X]) -> None:
         while True:
             try:
                 for _ in step(MAIN):
-                    MAIN.status = Status.IDLE
-                    break
+                    pass
+                MAIN.status = Status.IDLE
+                break
             except:
                 # Top level task may crash and throw an error, but given this is a main
                 # group we do not want to interrupt other unrelated tasks, which is why
@@ -494,11 +488,11 @@ def enqueue(task: ControllerFork[M, T, X]) -> None:
                 MAIN.stack.active.pop(0)
 
 
-def step(group: Group[T, X, M]) -> Generator[Instruction, Instruction, None]:
+def step(group: Group[T, X, M]) -> Generator[M, Any, None]:
     active = group.stack.active
     task = active[0] if active else None
     if task:
-        group.stack.idle.remove(task)
+        group.stack.idle.discard(task)
     while task:
         # Keep processing instructions until task is done, sends a `SUSPEND` request or
         # it has been removed from the active queue.
@@ -517,14 +511,14 @@ def step(group: Group[T, X, M]) -> Generator[Instruction, Instruction, None]:
                     group.stack.idle.add(task)
                     break
                 # if task requested a context (which is usually to suspend itself) pass back
-                # to a task reference and continue.
+                # a task reference and continue.
                 elif instruction is CURRENT:
                     instruction = task.send(task)
                     continue
                 else:
                     # otherwise task sent a message which we yield to the driver and
                     # continue
-                    instruction = task.send((yield instruction))
+                    instruction = task.send((yield instruction))  # type: ignore[arg-type]
                     break
             except StopIteration:
                 # task finished
@@ -534,20 +528,20 @@ def step(group: Group[T, X, M]) -> Generator[Instruction, Instruction, None]:
         active.pop(0)
         task = active[0] if active else None
         if task:
-            group.stack.idle.remove(task)
+            group.stack.idle.discard(task)
 
 
-def current() -> Generator[CurrentInstruction, Controller, Controller]:
+def current() -> Generator[CurrentInstruction, Controller[M, T], Controller[M, T]]:
     return (yield CURRENT)
 
-def suspend() -> Generator[SuspendInstruction, None, None]:
+def suspend() -> Generator[SuspendInstruction, Any, None]:
     yield SUSPEND
 
-def resume(task: Controller | Fork[T, X, M]):
+def resume(task: Controller[M, T] | Fork[T, X, M]) -> None:
     enqueue(task)
 
 def conclude(
-    handle: ControllerFork[M, T, X],
+    handle: ControllerFork[T, X, M],
     result: Result[T, Exception]
 ) -> Task[None, None]:
     """
@@ -562,7 +556,7 @@ def conclude(
         if isinstance(result, Success):
             # force the generator to end and return with `result.value`
             state = task.throw(StopIteration(result.value))
-        else:
+        elif isinstance(result, Failure):
             state = task.throw(result.error)
 
         # incase `task` has a `finally` block that still yields values into `state`
@@ -576,7 +570,7 @@ def conclude(
     yield
 
 
-def abort(handle: ControllerFork[M, T, X], error: Exception) -> Task[None, None]:
+def abort(handle: ControllerFork[T, X, M], error: Exception) -> Task[None, None]:
     """
     Aborts given task with an error. Task error type should match provided error.
 
@@ -587,7 +581,7 @@ def abort(handle: ControllerFork[M, T, X], error: Exception) -> Task[None, None]
     yield from conclude(handle, Failure(error))
 
 
-def exit(handle: Controller, value: T) -> Task[None, None]:
+def exit_(handle: Controller[M, T], value: Any) -> Task[None, None]:
     """
     Exits a task successfully with a return value.
 
@@ -598,7 +592,7 @@ def exit(handle: Controller, value: T) -> Task[None, None]:
     yield from conclude(handle, Success(value))
 
 
-def terminate(handle: Controller) -> Task[None, None]:
+def terminate(handle: Controller[M, T]) -> Task[None, None]:
     """
     Terminates a task (only for tasks with void return type). If your task has a
     non-`void` return type you should use `exit` instead.
@@ -609,7 +603,7 @@ def terminate(handle: Controller) -> Task[None, None]:
     yield from conclude(handle, Success(value=None))
 
 
-def group(forks: list[Fork[T, X, M]]) -> Task[Optional[Instruction], None]:
+def group(forks: list[Fork[T, X, M]]) -> Task[Optional[Instruction[M]], None]:
     """
     Groups multiple forks together and joins them with current task.
     """
@@ -623,7 +617,7 @@ def group(forks: list[Fork[T, X, M]]) -> Task[Optional[Instruction], None]:
     for fork in forks:
         result = fork.result
         if result is not None:
-            # only the first error should be saved, so `failure` has to be `None`
+            # only the first error should be recorded, so `failure` has to be `None`
             if not result.ok and failure is None:
                 failure = result  # type: ignore[assignment]
             continue
@@ -631,6 +625,7 @@ def group(forks: list[Fork[T, X, M]]) -> Task[Optional[Instruction], None]:
 
     # keep work looping until there is no more work to be done
     try:
+        # raise the exception that caused the first recorded failure result
         if failure:
             raise failure.error
         while True:
@@ -640,8 +635,9 @@ def group(forks: list[Fork[T, X, M]]) -> Task[Optional[Instruction], None]:
             if Stack.size(group.stack) > 0:
                 # if there are grouped forked tasks that are suspended, then suspend
                 # driver too.
-                # NOTE: that `enqueue()` also resumes this driver when forked task
-                # resumes
+                # NOTE: that `enqueue()` resumes this driver when suspended forked task
+                # resumes. since `self` is the driver task of the group containing the
+                # forked tasks
                 yield from suspend()
             else:
                 break
@@ -657,7 +653,7 @@ def group(forks: list[Fork[T, X, M]]) -> Task[Optional[Instruction], None]:
 
 
 def move(fork: Fork[T, X, M], group: TaskGroup[T, X, M]) -> None:
-    """Move a frok from one group to another."""
+    """Move a fork from one group to another."""
     from_ = TaskGroup.of(fork)
     if from_ is not group:
         active, idle = (from_.stack.active, from_.stack.idle)
@@ -668,18 +664,18 @@ def move(fork: Fork[T, X, M], group: TaskGroup[T, X, M]) -> None:
         if fork in idle:
             idle.remove(fork)
             target.idle.add(fork)
-        else:
+        elif fork in active:
             index = active.index(fork)
             # if task is in the job queue, we move it to a target job queue. Moving top
             # task in the queue requires extra care so it does not end up processed by
             # two groups which would lead to race. For that reason `step` loop checks
             # checks for group changes on each turn
             if index >= 0:
-                active.pop(0)
+                active.pop(index)
                 target.active.append(fork)
         # otherwise task is complete
 
-def join(fork: Fork[T, X, M]) -> Generator[Optional[Instruction], Any, T]:
+def join(fork: Fork[T, X, M]) -> Task[Optional[Instruction[M]], T]:
     """
     Joins a forked task back into the current task.
 
@@ -707,3 +703,4 @@ def join(fork: Fork[T, X, M]) -> Generator[Optional[Instruction], Any, T]:
         return result.value
     else:
         raise result.error
+
