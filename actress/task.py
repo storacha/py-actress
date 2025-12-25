@@ -52,6 +52,22 @@ When `suspend` instruction is received scheduler will suspend execution until
 it is resumed by queueing it from the outside event.
 """
 
+# `M` == `Event`
+Effect: TypeAlias = Generator[Union[Control, M], Any, None]
+"""
+Effect represents potentially asynchronous operations that results in a set of events.
+It is often comprised of multiple `Task` and represents either chain of events or a
+concurrent set of events (stretched over time).
+Effect compares to a `Stream`in Javascript the as `Task` compares to `Future` in Python.
+It is not a representation of an eventual result but rather a representation of an
+operation which if executed will produce certain result. `Effect` can also be compared
+to an `EventEmitter` in Javascript, but very often their `Event` type variable (`M`
+type variable in Python imlementation) is a union of various event types, unlike
+`EventEmitter`s however `Effect`s have inherent finality to them and in that regard are
+more like Javascript `Streams`
+"""
+
+
 @dataclass
 class Success(Generic[T]):
     "Result of a successful task."
@@ -704,3 +720,22 @@ def join(fork: Fork[T, X, M]) -> Task[Optional[Instruction[M]], T]:
     else:
         raise result.error
 
+
+def send(message: M) -> Effect[M]:
+    """
+    Task that sends a given message (or rather an effect producing this message).
+    Please note, that while you could use `yield mesage` instead, the reference
+    implementation for this library written in TS had risks of breaking changes in the
+    TS generator inference which could enable a replacement for `yield *`.
+    For uniformity purposes, we decided to stick with the same approach for the Python
+    implementation as well.
+    """
+    yield message
+
+
+def effect(task: Generator[None, Any, M]) -> Effect[M]:
+    """
+    Turns a task (that never fails or sends messages) into an effect of its result.
+    """
+    message = yield from task  # type: ignore[misc]
+    yield from send(message)
