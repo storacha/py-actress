@@ -68,7 +68,6 @@ types, unlike `EventEmitter`s however `Effect`s have inherent finality to them a
 that regard are more like Javascript `Streams`
 """
 
-
 @dataclass
 class Success(Generic[T]):
     "Result of a successful task."
@@ -211,13 +210,12 @@ def wait(input: Union[Awaitable[T], T]) -> Task[Control, T]:
     if is_async(input):
         # no need to track `failed = False` like in reference JS impl because failure
         # can be tracked by only the `Result` object in the `output` variable below
-        output: Result[T, Exception] = None  # type: ignore
+        output: Result[T, Exception] = None  # type: ignore[assignment]
 
         async def handle_async():
-            # closure variable
             nonlocal output
             try:
-                value = await (cast(Awaitable[T], input))  # cast to help type checker
+                value = await (cast(Awaitable[T], input))
                 output = Success(value)
             except Exception as error:
                 output = Failure(error)
@@ -241,11 +239,10 @@ def wait(input: Union[Awaitable[T], T]) -> Task[Control, T]:
         # can be avoided when values are sometimes promises and other times aren't.
         # unlike `await` however this will resume in the same tick.
 
-        # To ensure behavioural consistency in sync/async values of `input`, suspension
-        # of task happens immediately while `enqueue(task)` runs async after `wake`
-        # task is itself `enqueueed` into the `Main` group within the `main()` function.
-        # similar to how when `input` is `Awaitable` and current task (or context) is
-        # suspended immediately and other tasks run, while `input` is `awaited`.
+        # when the `wake` task is enqueued in func `main()`, it is enqueued in the `Main`
+        # group. and when executed, it enqueues `task`. thereby maintaining consistency
+        # in suspending immediately while `enqueue(task)` runs async after other tasks
+        # as it similarly happens if `input` was `Awaitable`
         main(wake(task))
         yield from suspend()  # suspension happens immediately
         return cast(T, input)
@@ -271,19 +268,19 @@ def is_message(value: Instruction[M]) -> bool:
 
 
 class Fork(Generic[T, X, M]):
-    global ID
-
     def __init__(
         self,
         task: Task[M, T],
-        handler: StateHandler[T, X] = StateHandler(),
-        options: ForkOptions = ForkOptions(name=None),
+        handler: Optional[StateHandler[T, X]] = None,
+        options: Optional[ForkOptions] = None,
     ) -> None:
-        self.handler= handler
-        self.id += ID
-        self.name = options.get('name', None) or ""
+        global ID
+        ID += 1
+        self.id = ID
+        self.handler = handler or StateHandler()
+        self.name: str = "" if options is None else (options.get('name', None) or "")
         self.task = task
-        self.state: Optional[Union[Instruction[M], StopIteration]] = None
+        self.state: Union[Instruction[M], StopIteration] = CURRENT
         self.status = Status.IDLE
         self.result: Optional[Result[T, X]] = None
         self.controller: Optional[Controller[M, T]] = None
@@ -297,16 +294,22 @@ class Fork(Generic[T, X, M]):
     def join(self) -> Task[Optional[M], T]:
         return join(self)
 
-    def abort(self, error: X):
+    def abort(self, error: X) -> Task[None, None]:
         return abort(self, error)
 
-    def activate(self) -> Fork:
+    def exit_(self, value: T) -> Task[None, None]:
+        return exit_(self, value)
+
+    def activate(self) -> Fork[T, X, M]:
         self.controller = iter(self.task)
         self.status = Status.ACTIVE
         enqueue(self)
         return self
 
-    def __iter__(self):
+    def __iter__(self) -> Fork[T, X, M]:
+        """
+        Make Fork iterable for use with yield from.
+        """
         return self.activate()
 
     def _panic(self, error: X) -> NoReturn:
@@ -325,13 +328,13 @@ class Fork(Generic[T, X, M]):
             self.status = Status.FINISHED
             if self.handler.onsuccess is not None:
                 self.handler.onsuccess(state.value)
-        # `state` isn't returned like it is in the reference JS impl because `_step` is
-        # only needed here to run success handlers and set `result` and `status` when
-        # the fork ends. And at that point the `state` or success return value of the
-        # task is already extracted from `StopIteration.value` and set in the result as
-        # `Success.value`.
-        # returning it is even more pointless when you realize `StopIteration` is caught
-        # and then `re-raised` just after calling `_step`.
+        # `state` is not returned here like in the reference js implementation because -
+        # `state` here can be set to `StopIteration(value: T)` which signals competion
+        # in Python, but in order to keep `Fork` behaviour predictable and similar to
+        # normal generators (e.g `controller` generators) `StopIteration` isn't returned
+        # but raised. So no point in returning `state` (especially on completion),
+        # within the class or - via the generator protocol methods - outside the class.
+        # just run success handlers, update state and set success value in result.
 
     def __next__(self) -> Instruction[M]:
         try:
@@ -384,21 +387,30 @@ class Fork(Generic[T, X, M]):
         except (Exception, GeneratorExit) as e:
             return self._panic(e)  # type: ignore[arg-type]
 
+    def return_(self, value: T) -> T:
+        try:
+            # also cast the type for `self.controller` to eliminate the type-checker
+            # from inferring that `self.controller` is still `None` after fork
+            # activation
+            cast(Controller, self.controller).throw(StopIteration(value))
+        except StopIteration as e:
+            self._step(e)
+        except Exception as e:
+            self._panic(e)  # type: ignore[arg-type]
+        else:
+            # the controller yielded instead of terminating. therefore enforce close
+            cast(Controller, self.controller).close()
+        return value
+
     def close(self) -> None:
         try:
             # self.controller.close() == self.controller.throw(GeneratorExit)
             # also cast the type for `self.controller` to eliminate the type-checker
             # from inferring that `self.controller` is still `None` after fork
             # activation
-            state = cast(Controller, self.controller).throw(GeneratorExit)
-            self._step(state)
-        # `GeneratorExit` is outside the scope of `Exception`. it subclasses
-        # `BaseException` instead - `Exception`'s parent class. Catch both exc.
-        except (Exception, GeneratorExit) as e:
+            cast(Controller, self.controller).close()
+        except (Exception) as e:
             self._panic(e)  # type: ignore[arg-type]
-        else:
-            # if no exception was raise, then the generator must have yielded
-            raise RuntimeError("Generator ignored `GeneratorExit`")
 
     def __repr__(self) -> str:
         return f"Fork(id={self.id}, status='{self.status}')"
@@ -422,8 +434,6 @@ MAIN = Main()
 
 class TaskGroup(Generic[T, X, M]):
     """Task group for managing concurrent tasks."""
-    global ID
-
     def __init__(
         self,
         driver: ControllerFork[T, X, M],
@@ -447,11 +457,13 @@ class TaskGroup(Generic[T, X, M]):
         else:
             self.stack = Stack()
 
-        self.id += ID
+        global ID
+        ID += 1
+        self.id = ID
 
     @staticmethod
     def of(member: ControllerFork[T, X, M]) -> Group[T, X, M]:
-        # since `Generator` objects dont have the `group` attribute if `member`
+        # since `Generator` objects don't have the `group` attribute if `member`
         # is not a `Fork` then it's group is the default `MAIN` group
         group = getattr(member, 'group', None)
         return group if group is not None else MAIN
@@ -459,7 +471,7 @@ class TaskGroup(Generic[T, X, M]):
 
     @staticmethod
     def enqueue(member: TaskFork[T, X, M], group: TaskGroup[T, X, M]) -> None:
-        member.group = group  # type: ignore[attr-defined]
+        member.group = group  # type: ignore[union-attr]
         group.stack.active.append(member)
 
 
@@ -504,7 +516,6 @@ def enqueue(task: ControllerFork[T, X, M]) -> None:
                 # we discard the error and the task that caused it.
                 MAIN.stack.active.pop(0)
 
-
 def step(group: Group[T, X, M]) -> Generator[M, Any, None]:
     active = group.stack.active
     task = active[0] if active else None
@@ -515,11 +526,11 @@ def step(group: Group[T, X, M]) -> Generator[M, Any, None]:
         # it has been removed from the active queue.
         # ⚠️ Group changes require extra care so please make sure to understand the
         # detail here. It occurs when a spawned task(s) are joined into a group which
-        # will change the task driver, that is when the conditional statement: 
-        # `task == active[0]` will become false and the task would need to be dropped
-        # immediately otherwise race dondition will occur due to task been driven by
-        # multiple concurrent schedulers.
-        while task == active[0]:
+        # will change the driver and the group the task belongs to, that is when the
+        # conditional statement: `task == active[0]` will become false and the task
+        # would need to be dropped immediately otherwise race dondition will occur due
+        # to task been driven by multiple concurrent schedulers.
+        while True:
             try:
                 instruction = task.send(None)
                 # if task is suspended we add it to the idle list and break the loop to move
@@ -547,6 +558,32 @@ def step(group: Group[T, X, M]) -> Generator[M, Any, None]:
         if task:
             group.stack.idle.discard(task)
 
+def spawn(task: Task[None, None]) -> None:
+    """
+    Executes a given task concurrently with a current task (task that spawned it).
+    Spawned task is detached from the task that spawned it and it can outlive it and/or
+    fail without affecting a task that spawned it. If you need to wait on a concurrent
+    task completion consider using `fork` instead which can later be `join`ed. If you
+    just want a task to block on another task's execution you can just use:
+    `yield from work()` directly instead.
+    """
+    main(task)
+
+def fork(task: Task[M, T], options: ForkOptions | None = None):
+    """
+    Executes a given task concurrently with current task (the task that initiated fork)
+    Forked task is detached from the task that created it and it can outlive it and /
+    or fail without affecting it. You do however get a handle for the fork which could
+    used to `join` the task, in which case `join`ing task would block until fork
+    finishes execution.
+
+    This is also a primary interface for executing tasks from the outside of the task
+    context. Function returns `Fork` which implements `Future` interface so it can be
+    awaited. Please note that calling `fork` does not really do anything, it lazily
+    starts execution when you either `await fork(work())` from arbitrary context or
+    `yield from fork(work())` in another task context.
+    """
+    return Fork(task, options=options)
 
 def current() -> Generator[CurrentInstruction, Controller[M, T], Controller[M, T]]:
     return (yield CURRENT)
@@ -571,20 +608,25 @@ def conclude(
     try:
         task = handle
         if isinstance(result, Success):
-            # force the generator to end and return with `result.value`
-            state = task.throw(StopIteration(result.value))
+            try:
+                # force the generator to end and return with `result.value`
+                state = task.throw(StopIteration(result.value))
+            except StopIteration:
+                yield
+                return
         elif isinstance(result, Failure):
             state = task.throw(result.error)
-
+    except Exception:
+        pass
+    else:
         # incase `task` has a `finally` block that still yields values into `state`
         if state is SUSPEND:
             idle = TaskGroup.of(task).stack.idle
             idle.add(task)
         elif state is not None:
             enqueue(task)
-    except Exception:
-        pass
     yield
+    return
 
 
 def abort(handle: ControllerFork[T, X, M], error: Exception) -> Task[None, None]:
@@ -598,7 +640,7 @@ def abort(handle: ControllerFork[T, X, M], error: Exception) -> Task[None, None]
     yield from conclude(handle, Failure(error))
 
 
-def exit_(handle: Controller[M, T], value: Any) -> Task[None, None]:
+def exit_(handle: ControllerFork[T, X, M], value: Any) -> Task[None, None]:
     """
     Exits a task successfully with a return value.
 
@@ -609,7 +651,7 @@ def exit_(handle: Controller[M, T], value: Any) -> Task[None, None]:
     yield from conclude(handle, Success(value))
 
 
-def terminate(handle: Controller[M, T]) -> Task[None, None]:
+def terminate(handle: Controller[M, None]) -> Task[None, None]:
     """
     Terminates a task (only for tasks with void return type). If your task has a
     non-`void` return type you should use `exit` instead.
@@ -627,8 +669,8 @@ def group(forks: list[Fork[T, X, M]]) -> Task[Optional[Instruction[M]], None]:
     # abort early if there's no work to do
     if len(forks) == 0: return
 
-    self = yield from current()
-    group = TaskGroup(self)
+    self_ = yield from current()
+    group = TaskGroup(self_)
     failure: Optional[Failure[X]] = None
 
     for fork in forks:
@@ -636,7 +678,7 @@ def group(forks: list[Fork[T, X, M]]) -> Task[Optional[Instruction[M]], None]:
         if result is not None:
             # only the first error should be recorded, so `failure` has to be `None`
             if not result.ok and failure is None:
-                failure = result  # type: ignore[assignment]
+                failure = cast(Failure, result)
             continue
         move(fork, group)
 
@@ -646,15 +688,16 @@ def group(forks: list[Fork[T, X, M]]) -> Task[Optional[Instruction[M]], None]:
         if failure:
             raise failure.error
         while True:
-            # run all tasks in the active queue to completion
+            # blocks the calling task: `self_`, to run all tasks in the active queue of
+            # the group to completion
             yield from step(group)
             # but there might be suspended tasks in `group.stack.idle`
             if Stack.size(group.stack) > 0:
                 # if there are grouped forked tasks that are suspended, then suspend
                 # driver too.
-                # NOTE: that `enqueue()` resumes this driver when suspended forked task
-                # resumes. since `self` is the driver task of the group containing the
-                # forked tasks
+                # NOTE: that `enqueue()` resumes the driver when suspended forked task
+                # resumes. since `enqueue()` unblocks the drivers of a task's group
+                # before starting the scheduler and processing the resumed task in it.
                 yield from suspend()
             else:
                 break
@@ -664,7 +707,7 @@ def group(forks: list[Fork[T, X, M]]) -> Task[Optional[Instruction[M]], None]:
 
         for task in group.stack.idle:
             yield from abort(task, error)
-            enqueue(task)
+            enqueue(task)  # `conclude` might add idle tasks back into `idle` queue
 
         raise error
 
@@ -708,14 +751,15 @@ def join(fork: Fork[T, X, M]) -> Task[Optional[Instruction[M]], T]:
     Raises:
         The fork's error if it failed
     """
-    # if fork is still idle activate it.
     if (fork.status == Status.IDLE):
         yield from fork
 
+    # if fork didn't complete, process `fork` in the scheduler and block until
+    # completion
     if fork.result is None:
         yield from group([fork])
 
-    result: Result[T, X] = fork.result  # type: ignore[union-attr]
+    result: Result[T, X] = fork.result  # type: ignore[assignment]
     if isinstance(result, Success):
         return result.value
     else:
