@@ -266,23 +266,107 @@ def is_message(value: Instruction[M]) -> bool:
         return False
     return True
 
+def is_instruction(value: Instruction[M]) -> bool:
+    return not is_message(value)
 
-class Fork(Generic[T, X, M]):
+
+class Future_(Generic[T, X]):
+    """
+    Base class for awaitable task handles.
+
+    Provides Promise-like interface for tasks, allowing them to be awaited
+    from async contexts.
+    """
+
+    def __init__(self, handler: Optional[StateHandler[T, X]] = None):
+        self.handler = handler or StateHandler()
+        self.result: Optional[Result[T, X]] = None
+        self._promise: Optional[asyncio.Future[T]] = None
+
+    def _get_promise(self) -> asyncio.Future[T]:
+        """
+        Lazily create and cache an asyncio.Future for this task.
+        """
+        if self._promise is not None:
+            return self._promise
+
+        # If we already have a result, create a pre-resolved future
+        if self.result is not None:
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future[T] = loop.create_future()
+
+            if isinstance(self.result, Success):
+                future.set_result(self.result.value)
+            else:
+                future.set_exception(self.result.error)
+
+            self._promise = future
+            return future
+
+        # Otherwise, create a future and wire up handlers
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+
+        # Store original handlers
+        original_onsuccess = self.handler.onsuccess
+        original_onfailure = self.handler.onfailure
+
+        def onsuccess(value: T) -> None:
+            if not future.done():
+                future.set_result(value)
+            if original_onsuccess:
+                original_onsuccess(value)
+
+        def onfailure(error: X) -> None:
+            if not future.done():
+                future.set_exception(error)
+            if original_onfailure:
+                original_onfailure(error)
+
+        self.handler.onsuccess = onsuccess
+        self.handler.onfailure = onfailure
+
+        self._promise = future
+        return future
+
+    def __await__(self) -> Generator[Any, Any, T]:
+        # Get the promise and await it
+        promise = self._get_promise()
+
+        # Activate the task (runs synchronously in MAIN scheduler)
+        self.activate()
+
+        return promise.__await__()
+
+    def activate(self) -> Future_[T, X]:
+        """
+        Activate the task. Overriden in subclasses.
+        """
+        return self
+
+
+class Fork(Future_[T, X], Generic[T, X, M]):
+    """
+    A handle to a running task that can be awaited.
+
+    Implements both the generator protocol (for use within tasks) and
+    the awaitable protocol (for use in async functions).
+    """
     def __init__(
         self,
         task: Task[M, T],
         handler: Optional[StateHandler[T, X]] = None,
         options: Optional[ForkOptions] = None,
     ) -> None:
+        super().__init__(handler or StateHandler())
+
         global ID
         ID += 1
         self.id = ID
-        self.handler = handler or StateHandler()
         self.name: str = "" if options is None else (options.get('name', None) or "")
         self.task = task
         self.state: Union[Instruction[M], StopIteration] = CURRENT
         self.status = Status.IDLE
-        self.result: Optional[Result[T, X]] = None
         self.controller: Optional[Controller[M, T]] = None
         self.group: Optional[Group[T, X, M]] = None
 
@@ -301,9 +385,14 @@ class Fork(Generic[T, X, M]):
         return exit_(self, value)
 
     def activate(self) -> Fork[T, X, M]:
-        self.controller = iter(self.task)
-        self.status = Status.ACTIVE
-        enqueue(self)
+        """
+        Activate the task and enqueue it for execution.
+        """
+        # Only activate if not already active or finished
+        if self.controller is None:
+            self.controller = iter(self.task)
+            self.status = Status.ACTIVE
+            enqueue(self)
         return self
 
     def __iter__(self) -> Fork[T, X, M]:
