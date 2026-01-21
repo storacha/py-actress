@@ -2,13 +2,14 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from typing import Any, Generic, Literal, NoReturn, Optional, TypeVar, TypedDict, Union, cast, overload
-from collections.abc import Awaitable, Generator, Callable
+from collections.abc import Awaitable, Generator, Callable, Iterable
 from enum import Enum
 from typing_extensions import TypeAlias
 
 T = TypeVar("T")  # value of task returned (on success)
 X = TypeVar("X", bound= Exception)  # exception raised by task (failure)
 M = TypeVar("M")  # message yielded by task
+U = TypeVar("U")
 
 
 class CurrentInstruction:
@@ -53,18 +54,18 @@ it is resumed by queueing it from the outside event.
 """
 
 # `M` == `Event`
-Effect: TypeAlias = Generator[Union[Control, M], Any, None]
+Effect: TypeAlias = Generator[M, Any, None]
 """
 Effect represents potentially asynchronous operations that results in a set of events.
 It is often comprised of multiple `Task` and represents either chain of events or a
 concurrent set of events (stretched over time).
-Effect compares to a `Stream`in Javascript the as `Task` compares to `Future` in Python.
-It is not a representation of an eventual result but rather a representation of an
-operation which if executed will produce certain result. `Effect` can also be compared
-to an `EventEmitter` in Javascript, but very often their `Event` type variable (`M`
-type variable in Python imlementation) is a union of various event types, unlike
-`EventEmitter`s however `Effect`s have inherent finality to them and in that regard are
-more like Javascript `Streams`
+Effect compares to a `Stream` in Javascript in the same way as `Task` compares to
+`Future` in Python. It is not a representation of an eventual result but rather a
+representation of an operation which if executed will produce certain result. `Effect`
+can also be compared to an `EventEmitter` in Javascript, but very often their `Event`
+type variable (`M` type variable in Python imlementation) is a union of various event
+types, unlike `EventEmitter`s however `Effect`s have inherent finality to them and in
+that regard are more like Javascript `Streams`
 """
 
 
@@ -720,7 +721,6 @@ def join(fork: Fork[T, X, M]) -> Task[Optional[Instruction[M]], T]:
     else:
         raise result.error
 
-
 def send(message: M) -> Effect[M]:
     """
     Task that sends a given message (or rather an effect producing this message).
@@ -732,10 +732,189 @@ def send(message: M) -> Effect[M]:
     """
     yield message
 
-
-def effect(task: Generator[None, Any, M]) -> Effect[M]:
+def effect(task: Task[None, T]) -> Effect[T]:
     """
     Turns a task (that never fails or sends messages) into an effect of its result.
     """
     message = yield from task  # type: ignore[misc]
     yield from send(message)
+
+def loop(init: Effect[M], next_: Callable[[M], Effect[M]]) -> Task[None, None]:
+    controller = yield from current()
+    group = TaskGroup(controller)
+    TaskGroup.enqueue(iter(init), group)
+
+    while True:
+        for msg in step(group):
+            TaskGroup.enqueue(iter(next_(msg)), group)
+        if Stack.size(group.stack) > 0:
+            yield from suspend()
+        else:
+            break
+
+Tag: TypeAlias = str
+
+
+class Tagger(Generic[T, X, M]):
+    def __init__(self, tags: list[str], source: Fork[T, X, M]) -> None:
+        self.tags = tags
+        self.source = source
+        self.controller: Optional[Fork[T, X, M]] = None
+
+    def __iter__(self):
+        if not self.controller:
+            self.controller = iter(self.source)
+        return self
+
+    def box(
+        self, state: Union[Instruction[M], StopIteration]
+    ) -> Union[Control, Tagged[M]]:
+        if isinstance(state, StopIteration):
+            return state.value
+        else:
+            if state is CURRENT or state is SUSPEND:
+                return state  # type: ignore[return-value]
+            else:  # tag non-control instructions
+                # Instead of boxing result at each transform step we perform in-place
+                # mutation as we know nothing else is accessing this value.
+                tagged = state
+                for tag in self.tags:
+                    tagged = with_tag(tag, tagged)
+                return cast(Tagged, tagged)
+
+    def __next__(self) -> Union[Control, Tagged[M]]:
+        return self.box(next(cast(Fork, self.controller)))
+
+    def close(self) -> None:
+        cast(Fork, self.controller).close()
+
+    def send(self, instruction: Instruction[M]) -> Union[Control, Tagged[M]]:
+        return self.box(cast(Fork, self.controller).send(instruction))
+
+    def throw(self, error: Exception) -> Union[Control, Tagged[M]]:
+        return self.box(cast(Fork, self.controller).throw(error))
+
+    def return_(self, value: T) -> Union[Control, Tagged[T]]:
+        return self.box(cast(Fork, self.controller).return_(value))  # type: ignore[return-value]
+
+    def __str__(self) -> str:
+        return "TaggedEffect"
+
+
+def _none_effect() -> Effect[None]:
+    return
+    yield  # necessary for this func to be recognized as a generator that yields nothing
+
+NONE_: Effect[None] = _none_effect()
+
+def none_() -> Effect[None]:
+    """
+    Returns empty `Effect`, that is produces no messages. Kind of like `[]` or `""` but
+    for effects.
+    """
+    return NONE_
+
+def then_(
+    task: Task[M, T],
+    resolve: Callable[[T], U],
+    reject: Callable[[X], U],
+) -> Task[M, U]:
+    try:
+        return resolve((yield from task))
+    except Exception as e:
+        return reject(e)  # type: ignore[arg-type]
+
+def all_(tasks: Iterable[Task[M, T]]) -> Task[Any, list[T]]:
+    """
+    Takes iterable of tasks and runs them concurrently, returning an array of results in
+    an order of the tasks (not the order of completion). If any of the tasks fail all
+    the rest are aborted and error is thrown into the calling task.
+    """
+    self_ = yield from current()
+    forks: list[Optional[Fork[T, Exception, None]]] = []
+    results: list[Optional[T]] = []
+    count_ = 0
+
+    def succeed(idx: int) -> Callable[[T], None]:
+        def handler(value: T) -> None:
+            nonlocal count_
+            forks[idx] = None
+            results[idx] = value
+            count_ -= 1
+            if count_ == 0:
+                enqueue(self_)
+        return handler
+
+    def fail(error: Exception) -> None:
+        for handle in forks:
+            if handle is not None:
+                enqueue(abort(handle, error))
+        enqueue(abort(self_, error))
+
+    for i, task in enumerate(tasks):
+        results.append(None) # keeps the results list at a size of len(tasks)
+        fk = (yield from fork(then_(task, succeed(i), fail)))
+        forks.append(fk)
+        count_ += 1
+
+    if count_ > 0:
+        yield from suspend()
+
+    return cast(list[T], results)
+
+
+Tagged: TypeAlias = dict[str, Union[Tag, M]]
+"""
+The dictionary is shaped like: {"type": tag, tag: value}. There is no way to express
+that dictionary shape in Python's current type system at the time of writing this
+implementation.
+"""
+
+def with_tag(tag: Tag, value: M) -> Tagged[M]:
+    return {"type": tag, tag: value}
+
+def tag(effect: Union[Fork[T, X, M], Tagger[T, X, M]], tag: str) -> Effect[Union[Control, Tagged[M]]]:
+    """
+    Tags an effect by boxing each event with an object that has `type` field
+    corresponding to the given tag and same named field holding original message e.g
+    given `nums` effect
+    """
+    if effect is NONE_:
+        return NONE_  # type: ignore[return-value]
+    elif isinstance(effect, Tagger):
+        return Tagger(tags=(effect.tags + [tag]), source=effect.source)  # type: ignore[return-value]
+    else:
+        return Tagger([tag], effect)  # type:ignore[return-value]
+
+def listen(sources: dict[Tag, Effect[M]]) -> Effect[Union[Control, Tagged[M]]]:
+    """
+    Takes several effects and merges them into a single effect of tagged variants so
+    that their source could be identified via `type` field.
+    """
+    forks: list[Fork] = []
+    for entry in sources.items():
+        name, eff = entry
+        if eff is not NONE_:
+            forks.append(
+                (yield from fork(tag(eff, name)))  # type: ignore[arg-type]
+            )
+    yield from group(forks) # type: ignore[misc]
+
+def batch(effects: list[Effect[T]]) -> Effect[T]:
+    """
+    Takes several effects and combines them into one effect
+    """
+    forks: list[Fork] = []
+    for eff in effects:
+        forks.append((yield from fork(eff)))  # type: ignore[arg-type]
+    yield from group(forks)  # type: ignore[misc]
+
+def effects(tasks: list[Task[None, T]]) -> Effect[Optional[T]]:
+    """
+    Takes several tasks and creates an effect of them all.
+    """
+    if tasks:
+        return batch([effect(task) for task in tasks])
+    else:
+        return NONE_
+
