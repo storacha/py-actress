@@ -533,20 +533,23 @@ def step(group: Group[T, X, M]) -> Generator[M, Any, None]:
         while True:
             try:
                 instruction = task.send(None)
-                # if task is suspended we add it to the idle list and break the loop to move
-                # to a next task
-                if instruction is SUSPEND:
-                    group.stack.idle.add(task)
-                    break
-                # if task requested a context (which is usually to suspend itself) pass back
-                # a task reference and continue.
-                elif instruction is CURRENT:
-                    instruction = task.send(task)
-                    continue
+                while task == active[0]:
+                    # if task is suspended we add it to the idle list and break the loop to move
+                    # to a next task
+                    if instruction is SUSPEND:
+                        group.stack.idle.add(task)
+                        break
+                    # if task requested a context (which is usually to suspend itself) pass back
+                    # a task reference and continue.
+                    elif instruction is CURRENT:
+                        instruction = task.send(task)
+                        continue
+                    else:
+                        # otherwise task sent a message which we yield to the driver and
+                        # continue
+                        instruction = task.send((yield instruction))  # type: ignore[misc]
+                        break
                 else:
-                    # otherwise task sent a message which we yield to the driver and
-                    # continue
-                    instruction = task.send((yield instruction))  # type: ignore[arg-type]
                     break
             except StopIteration:
                 # task finished
