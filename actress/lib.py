@@ -143,21 +143,22 @@ def all(tasks: Iterable[Task[T, Any, Any]]) -> Generator[Instruction[Any], Any, 
     
     return cast(list[T], results)
 
-def then(task_obj: Task[T, Any, Any], resolve: Any, reject: Any) -> Generator[Instruction[Any], Any, Any]:  # type: ignore[func-returns-value]
+def then(task_obj: Task[T, Any, Any], resolve: Any, reject: Any) -> Generator[Instruction[Any], Any, Any]:
     """
     Kind of like promise.then.
     """
     try:
-        result = yield from cast(Iterable[Any], task_obj)
-        res = resolve(result)
+        result: Any = yield from cast(Iterable[Any], task_obj)  # type: ignore[func-returns-value]
+        res: Any = resolve(result)
         if isinstance(res, Generator):
-            res = yield from res
-        return res
+            return cast(Any, (yield from res))
+        return cast(Any, res)
     except Exception as e:
-        rej = reject(e)
+        rej: Any = reject(e)
         if isinstance(rej, Generator):
-            rej = yield from rej
-        return rej
+            return cast(Any, (yield from rej))
+        return cast(Any, rej)
+    return cast(Any, None)  # Unreachable, but satisfies mypy
 
 def isMessage(value: Any) -> bool:
     return value not in (SUSPEND, CURRENT)
