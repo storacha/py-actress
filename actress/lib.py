@@ -1,23 +1,23 @@
-from typing import Any, TypeVar, Generator, Optional, Union, Iterable, cast
+from typing import Any, TypeVar, Generator, Optional, Union, Iterable, cast, Iterator
 from .task import Task, Controller, Instruction, CURRENT, SUSPEND, Main, Stack, TaskGroup, Result, Fork, Status
 
 T = TypeVar("T")
 X = TypeVar("X")
 M = TypeVar("M")
 
-def send(message: T) -> Task[None, Any, T]:
+def send(message: T) -> Generator[T, Any, None]:
     """
     Task that sends given message.
     """
     yield message
     return None
 
-def listen(source: dict[str, Task[Any, Any, Any]]) -> Task[None, Any, Any]:
+def listen(source: dict[str, Task[Any, Any, Any]]) -> Generator[Instruction[Any], Any, None]:
     """
     Takes several effects and merges them into a single effect of tagged
     variants so that their source could be identified via `type` field.
     """
-    forks = []
+    forks: list[Fork[Any, Any, Any]] = []
     for name, effect_obj in source.items():
         if effect_obj is not NONE:
             f = yield from fork(tag(effect_obj, name))
@@ -29,9 +29,9 @@ def effects(tasks_list: list[Task[Any, Any, Any]]) -> Task[None, Any, Any]:
     """
     Takes several tasks and creates an effect of them all.
     """
-    return batch([effect(t) for t in tasks_list]) if tasks_list else NONE
+    return cast(Task[None, Any, Any], batch([effect(t) for t in tasks_list])) if tasks_list else NONE
 
-def effect(task_obj: Task[T, Any, Any]) -> Task[None, Any, T]:
+def effect(task_obj: Task[T, Any, Any]) -> Generator[Instruction[T], Any, None]:
     """
     Turns a task into an effect of its result.
     """
@@ -39,11 +39,11 @@ def effect(task_obj: Task[T, Any, Any]) -> Task[None, Any, T]:
     yield from send(message)
     return None
 
-def batch(effects_list: list[Task[None, Any, Any]]) -> Task[None, Any, Any]:
+def batch(effects_list: list[Task[None, Any, Any]]) -> Generator[Instruction[Any], Any, None]:
     """
     Takes several effects and combines them into one.
     """
-    forks = []
+    forks: list[Fork[Any, Any, Any]] = []
     for ef in effects_list:
         f = yield from fork(ef)
         forks.append(f)
@@ -66,9 +66,9 @@ class Tagger(Task[Any, Any, Any], Controller[Any, Any, Any]):
         self.source = source
         self.controller: Optional[Controller[Any, Any, Any]] = None
 
-    def __iter__(self) -> Controller[Any, Any, Any]:
+    def __iter__(self) -> "Tagger":
         if self.controller is None:
-            self.controller = iter(self.source)
+            self.controller = cast(Controller[Any, Any, Any], iter(self.source))
         return self
 
     def box(self, state: Instruction[Any]) -> Instruction[Any]:
@@ -79,17 +79,22 @@ class Tagger(Task[Any, Any, Any], Controller[Any, Any, Any]):
             value = {"type": t, t: value}
         return value
 
-    def next(self, value: Any) -> Instruction[Any]:
-        assert self.controller is not None
-        return self.box(self.controller.next(value))
+    def __next__(self) -> Instruction[Any]:
+        return self.send(None)
 
-    def throw(self, typ: Any, val: Optional[BaseException] = None, tb: Any = None) -> Instruction[Any]:
+    def send(self, value: Any) -> Instruction[Any]:
         assert self.controller is not None
-        return self.box(self.controller.throw(typ, val, tb))
+        return self.box(self.controller.send(value))
+
+    def throw(self, typ: Any, val: Union[BaseException, object] = None, tb: Any = None) -> Instruction[Any]:
+        assert self.controller is not None
+        return self.box(cast(Generator[Instruction[Any], Any, Any], self.controller).throw(typ, val, tb))
 
     def return_(self, value: Any) -> Instruction[Any]:
         assert self.controller is not None
-        return self.box(self.controller.return_(value))
+        if hasattr(self.controller, "return_"):
+            return self.box(self.controller.return_(value))
+        return self.box(value)
 
 def none() -> Task[None, Any, Any]:
     """
@@ -97,7 +102,7 @@ def none() -> Task[None, Any, Any]:
     """
     return NONE
 
-def all(tasks: Iterable[Task[T, Any, Any]]) -> Task[list[T], Any, Any]:
+def all(tasks: Iterable[Task[T, Any, Any]]) -> Generator[Instruction[Any], Any, list[T]]:
     """
     Takes iterable of tasks and runs them concurrently.
     """
@@ -107,8 +112,8 @@ def all(tasks: Iterable[Task[T, Any, Any]]) -> Task[list[T], Any, Any]:
     forks: list[Optional[Fork[Any, Any, Any]]] = []
     count = 0
     
-    def succeed(idx: int):
-        def _succeed(value: T):
+    def succeed(idx: int) -> Any:
+        def _succeed(value: T) -> None:
             nonlocal count
             forks[idx] = None
             results[idx] = value
@@ -117,15 +122,17 @@ def all(tasks: Iterable[Task[T, Any, Any]]) -> Task[list[T], Any, Any]:
                 enqueue(self_ctrl)
         return _succeed
 
-    def fail(error: Any):
+    def fail(error: Any) -> None:
         for f in forks:
             if f:
-                enqueue(f.abort(error))
+                enqueue(cast(Controller[Any, Any, Any], f.abort(error)))
         enqueue(self_ctrl.throw(type(error), error, None))
 
     for task_obj in tasks:
         idx = len(forks)
-        f = fork(then(task_obj, succeed(idx), fail))
+        # We need to cast the then() generator to Task because it matches the protocol
+        f_task = cast(Task[Any, Any, Any], then(task_obj, succeed(idx), fail))
+        f: Fork[Any, Any, Any] = fork(f_task)
         forks.append(f)
         yield from f
         count += 1
@@ -136,15 +143,21 @@ def all(tasks: Iterable[Task[T, Any, Any]]) -> Task[list[T], Any, Any]:
     
     return cast(list[T], results)
 
-def then(task_obj: Task[T, Any, Any], resolve: Any, reject: Any) -> Task[Any, Any, Any]:
+def then(task_obj: Task[T, Any, Any], resolve: Any, reject: Any) -> Generator[Instruction[Any], Any, Any]:  # type: ignore[func-returns-value]
     """
     Kind of like promise.then.
     """
     try:
-        result = yield from task_obj
-        return resolve(result)
+        result = yield from cast(Iterable[Any], task_obj)
+        res = resolve(result)
+        if isinstance(res, Generator):
+            res = yield from res
+        return res
     except Exception as e:
-        return reject(e)
+        rej = reject(e)
+        if isinstance(rej, Generator):
+            rej = yield from rej
+        return rej
 
 def isMessage(value: Any) -> bool:
     return value not in (SUSPEND, CURRENT)
@@ -154,21 +167,21 @@ def isInstruction(value: Any) -> bool:
 
 class Group:
     @staticmethod
-    def of(member: Any) -> Union[Main, TaskGroup]:
+    def of(member: Any) -> Union[Main[Any, Any, Any], TaskGroup[Any, Any, Any]]:
         return getattr(member, "group", MAIN)
 
     @staticmethod
-    def enqueue(member: Any, group_obj: Union[Main, TaskGroup]):
+    def enqueue(member: Any, group_obj: Union[Main[Any, Any, Any], TaskGroup[Any, Any, Any]]) -> None:
         member.group = group_obj
         group_obj.stack.active.append(member)
 
-def main(task_obj: Task[None, Any, Any]):
+def main(task_obj: Task[None, Any, Any]) -> None:
     """
     Starts a main task.
     """
-    enqueue(iter(task_obj))
+    enqueue(iter(cast(Any, task_obj)))
 
-def enqueue(task_ctrl: Controller[Any, Any, Any]):
+def enqueue(task_ctrl: Controller[Any, Any, Any]) -> None:
     group_obj = Group.of(task_ctrl)
     group_obj.stack.active.append(task_ctrl)
     if task_ctrl in group_obj.stack.idle:
@@ -176,7 +189,7 @@ def enqueue(task_ctrl: Controller[Any, Any, Any]):
 
     parent = getattr(group_obj, "parent", None)
     while parent:
-        if group_obj.driver in parent.stack.idle:
+        if isinstance(group_obj, TaskGroup) and group_obj.driver in parent.stack.idle:
             parent.stack.idle.remove(group_obj.driver)
             parent.stack.active.append(group_obj.driver)
         else:
@@ -196,10 +209,10 @@ def enqueue(task_ctrl: Controller[Any, Any, Any]):
                 if MAIN.stack.active:
                     MAIN.stack.active.pop(0)
 
-def resume(task_ctrl: Controller[Any, Any, Any]):
+def resume(task_ctrl: Controller[Any, Any, Any]) -> None:
     enqueue(task_ctrl)
 
-def step(group_obj: Union[Main, TaskGroup]) -> Generator[Any, Any, None]:
+def step(group_obj: Union[Main[Any, Any, Any], TaskGroup[Any, Any, Any]]) -> Generator[Any, Any, None]:
     active = group_obj.stack.active
     while active:
         task_ctrl = active[0]
@@ -213,9 +226,9 @@ def step(group_obj: Union[Main, TaskGroup]) -> Generator[Any, Any, None]:
                     group_obj.stack.idle.add(task_ctrl)
                     break 
                 elif instruction == CURRENT:
-                    instruction = task_ctrl.next(task_ctrl)
+                    instruction = task_ctrl.send(task_ctrl)
                 else:
-                    instruction = task_ctrl.next((yield instruction))
+                    instruction = task_ctrl.send((yield instruction))
             
             if task_ctrl == active[0]:
                 active.pop(0)
@@ -227,27 +240,27 @@ def step(group_obj: Union[Main, TaskGroup]) -> Generator[Any, Any, None]:
                 active.pop(0)
             raise e
 
-def spawn(task_obj: Task[None, Any, Any]):
+def spawn(task_obj: Task[None, Any, Any]) -> None:
     main(task_obj)
 
 def fork(task_obj: Task[T, X, M], options: Any = None) -> Fork[T, X, M]:
     return Fork(task_obj, options)
 
-def exit(handle: Controller[T, X, M], value: T) -> Task[None, Any, Any]:
+def exit(handle: Controller[T, X, M], value: T) -> Generator[Instruction[Any], Any, None]:
     return conclude(handle, Result(ok=True, value=value, error=None))
 
-def terminate(handle: Controller[None, X, M]) -> Task[None, Any, Any]:
+def terminate(handle: Controller[None, X, M]) -> Generator[Instruction[Any], Any, None]:
     return conclude(handle, Result(ok=True, value=None, error=None))
 
-def abort(handle: Controller[T, X, M], error: X) -> Task[None, Any, Any]:
+def abort(handle: Controller[T, X, M], error: X) -> Generator[Instruction[Any], Any, None]:
     return conclude(handle, Result(ok=False, value=None, error=error))
 
-def conclude(handle: Controller[Any, Any, Any], result: Result) -> Task[None, Any, Any]:
+def conclude(handle: Controller[Any, Any, Any], result: Result[Any, Any]) -> Generator[Instruction[Any], Any, None]:
     try:
         if result.ok:
             state = handle.return_(result.value)
         else:
-            state = handle.throw(type(result.error), result.error, None)
+            state = handle.throw(type(result.error), cast(BaseException, result.error), None)
         
         if state == SUSPEND:
             Group.of(handle).stack.idle.add(handle)
@@ -257,12 +270,12 @@ def conclude(handle: Controller[Any, Any, Any], result: Result) -> Task[None, An
         pass
     yield from []
 
-def group(forks_list: list[Fork[Any, Any, Any]]) -> Task[None, Any, Any]:
+def group(forks_list: list[Fork[Any, Any, Any]]) -> Generator[Instruction[Any], Any, None]:
     if not forks_list:
-        return
+        return None
     
     self_ctrl = yield CURRENT
-    group_obj = TaskGroup(id=next(ID_GEN), parent=Group.of(self_ctrl), driver=self_ctrl, stack=Stack(), result=None)
+    group_obj = TaskGroup(id=next(ID_GEN), parent=Group.of(self_ctrl), driver=self_ctrl, stack=Stack[Any, Any, Any]())
     
     failure = None
     for f in forks_list:
@@ -274,7 +287,7 @@ def group(forks_list: list[Fork[Any, Any, Any]]) -> Task[None, Any, Any]:
     
     try:
         if failure:
-            raise failure.error
+            raise cast(BaseException, failure.error)
         
         while True:
             yield from step(group_obj)
@@ -290,7 +303,7 @@ def group(forks_list: list[Fork[Any, Any, Any]]) -> Task[None, Any, Any]:
             enqueue(t)
         raise e
 
-def move(f: Fork[Any, Any, Any], target_group: TaskGroup):
+def move(f: Fork[Any, Any, Any], target_group: TaskGroup[Any, Any, Any]) -> None:
     source_group = Group.of(f)
     if source_group != target_group:
         if f in source_group.stack.idle:
@@ -301,7 +314,7 @@ def move(f: Fork[Any, Any, Any], target_group: TaskGroup):
             target_group.stack.active.append(f)
         f.group = target_group
 
-def join(f: Fork[T, X, M]) -> Task[T, X, M]:
+def join(f: Fork[T, X, M]) -> Generator[Instruction[M], Any, T]:
     if f.status == "idle":
         yield from f
     
@@ -310,11 +323,11 @@ def join(f: Fork[T, X, M]) -> Task[T, X, M]:
     
     assert f.result is not None
     if f.result.ok:
-        return f.result.value
+        return cast(T, f.result.value)
     else:
-        raise f.result.error
+        raise cast(BaseException, f.result.error)
 
-def loop(init: Task[None, Any, M], next_fn: Any) -> Task[None, Any, Any]:
+def loop(init: Task[None, Any, M], next_fn: Any) -> Generator[Instruction[M], Any, None]:
     self_ctrl = yield CURRENT
     group_obj = Group.of(self_ctrl)
     Group.enqueue(iter(init), group_obj)
@@ -329,12 +342,12 @@ def loop(init: Task[None, Any, M], next_fn: Any) -> Task[None, Any, Any]:
             break
 
 ID_COUNTER = 0
-def id_generator():
+def id_generator() -> Iterator[int]:
     global ID_COUNTER
     while True:
         ID_COUNTER += 1
         yield ID_COUNTER
 
-ID_GEN = id_generator()
-MAIN = Main()
-NONE = (lambda: (yield from []))()
+ID_GEN: Iterator[int] = id_generator()
+MAIN: Main[Any, Any, Any] = Main()
+NONE: Task[None, Any, Any] = cast(Task[None, Any, Any], (lambda: (yield from []))())
