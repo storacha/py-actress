@@ -202,7 +202,7 @@ def enqueue(task_ctrl: Controller[Any, Any, Any]) -> None:
         MAIN.status = "active"
         while True:
             try:
-                for _ in step(MAIN):
+                for _ in step(MAIN):  # pylint: disable=not-an-iterable
                     pass
                 MAIN.status = "idle"
                 break
@@ -291,7 +291,7 @@ def group(forks_list: list[Fork[Any, Any, Any]]) -> Generator[Instruction[Any], 
             raise cast(BaseException, failure.error)
         
         while True:
-            yield from step(group_obj)
+            yield from step(group_obj)  # pylint: disable=not-an-iterable
             if len(group_obj.stack.active) + len(group_obj.stack.idle) > 0:
                 yield SUSPEND
             else:
@@ -334,7 +334,7 @@ def loop(init: Task[None, Any, M], next_fn: Any) -> Generator[Instruction[M], An
     Group.enqueue(iter(init), group_obj)
 
     while True:
-        for message in step(group_obj):
+        for message in step(group_obj):  # pylint: disable=not-an-iterable
             Group.enqueue(iter(next_fn(message)), group_obj)
 
         if len(group_obj.stack.active) + len(group_obj.stack.idle) > 0:
