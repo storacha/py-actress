@@ -395,11 +395,18 @@ class Fork(Future_[T, X], Generic[T, X, M]):
             enqueue(self)
         return self
 
-    def __iter__(self) -> Fork[T, X, M]:
+    def __iter__(self) -> Generator[Any, Any, Fork[T, X, M]]:
         """
         Make Fork iterable for use with yield from.
         """
-        return self.activate()
+        # making __iter__ a generator ensures that `yield from fork(work())` schedules
+        # the fork for concurrent execution without enabling synchronous driving of the
+        # forked task after activation and then returns immediately (since MAIN group
+        # is likely already actively being executed by the scheduler and `work` already
+        # queued in `MAIN`s active queue).
+        self.activate()
+        return self
+        yield
 
     def _panic(self, error: X) -> NoReturn:
         self.result = Failure(ok=False, error=error)
@@ -595,8 +602,7 @@ def enqueue(task: ControllerFork[T, X, M]) -> None:
         MAIN.status = Status.ACTIVE
         while True:
             try:
-                for _ in step(MAIN):
-                    pass
+                for m in step(MAIN):
                 MAIN.status = Status.IDLE
                 break
             except:
@@ -619,33 +625,32 @@ def step(group: Group[T, X, M]) -> Generator[M, Any, None]:
         # conditional statement: `task == active[0]` will become false and the task
         # would need to be dropped immediately otherwise race dondition will occur due
         # to task been driven by multiple concurrent schedulers.
-        while True:
-            try:
-                instruction = task.send(None)
-                while task == active[0]:
-                    # if task is suspended we add it to the idle list and break the loop to move
-                    # to a next task
-                    if instruction is SUSPEND:
-                        group.stack.idle.add(task)
-                        break
-                    # if task requested a context (which is usually to suspend itself) pass back
-                    # a task reference and continue.
-                    elif instruction is CURRENT:
-                        instruction = task.send(task)
-                        continue
-                    else:
-                        # otherwise task sent a message which we yield to the driver and
-                        # continue
-                        instruction = task.send((yield instruction))  # type: ignore[misc]
-                        break
-                else:
+        try:
+            input_value = None
+            while task == active[0]:
+                instruction = task.send(input_value)
+                print(f"Message yielded: {instruction}")
+                if instruction is SUSPEND:
+                    group.stack.idle.add(task)
                     break
-            except StopIteration:
-                # task finished
-                break
+                # if task requested a context (which is usually to suspend itself) pass back
+                # a task reference and continue.
+                elif instruction is CURRENT:
+                    input_value = task
+                    continue
+                else:
+                    # otherwise task sent a message which we yield to the driver and
+                    # continue
+                    input_value = task.send((yield instruction))  # type: ignore[misc]
+                    continue
+        except StopIteration:
+            # task finished
+            pass
 
         # if task is complete or got suspended we move to a next task
-        active.pop(0)
+        if active and active[0] == task:
+            active.pop(0)
+
         task = active[0] if active else None
         if task:
             group.stack.idle.discard(task)
@@ -661,7 +666,7 @@ def spawn(task: Task[None, None]) -> None:
     """
     main(task)
 
-def fork(task: Task[M, T], options: ForkOptions | None = None):
+def fork(task: Task[M, T], options: ForkOptions | None = None) -> Fork[T, Exception, M]:
     """
     Executes a given task concurrently with current task (the task that initiated fork)
     Forked task is detached from the task that created it and it can outlive it and /
@@ -895,7 +900,7 @@ class Tagger(Generic[T, X, M]):
     def __init__(self, tags: list[str], source: Fork[T, X, M]) -> None:
         self.tags = tags
         self.source = source
-        self.controller: Optional[Fork[T, X, M]] = None
+        self.controller: Optional[Controller] = None
 
     def __iter__(self):
         if not self.controller:
@@ -990,7 +995,7 @@ def all_(tasks: Iterable[Task[M, T]]) -> Task[Any, list[T]]:
     for i, task in enumerate(tasks):
         results.append(None) # keeps the results list at a size of len(tasks)
         fk = (yield from fork(then_(task, succeed(i), fail)))
-        forks.append(fk)
+        forks.append(fk)  # type: ignore[arg-type]
         count_ += 1
 
     if count_ > 0:
