@@ -567,8 +567,12 @@ class TaskGroup(Generic[T, X, M]):
 
     @staticmethod
     def enqueue(member: TaskFork[T, X, M], group: TaskGroup[T, X, M]) -> None:
-        member.group = group  # type: ignore[union-attr]
-        group.stack.active.append(member)
+        try:
+            member.group = group  # type: ignore[union-attr]
+        except AttributeError:
+            pass
+        finally:
+            group.stack.active.append(member)
 
 
 Group = Union[TaskGroup[T, X, M], Main[T, X, M]]
@@ -603,6 +607,7 @@ def enqueue(task: ControllerFork[T, X, M]) -> None:
         while True:
             try:
                 for m in step(MAIN):
+                    pass
                 MAIN.status = Status.IDLE
                 break
             except:
@@ -629,7 +634,6 @@ def step(group: Group[T, X, M]) -> Generator[M, Any, None]:
             input_value = None
             while task == active[0]:
                 instruction = task.send(input_value)
-                print(f"Message yielded: {instruction}")
                 if instruction is SUSPEND:
                     group.stack.idle.add(task)
                     break
@@ -641,7 +645,7 @@ def step(group: Group[T, X, M]) -> Generator[M, Any, None]:
                 else:
                     # otherwise task sent a message which we yield to the driver and
                     # continue
-                    input_value = task.send((yield instruction))  # type: ignore[misc]
+                    input_value = yield instruction  # type: ignore[misc]
                     continue
         except StopIteration:
             # task finished
@@ -655,7 +659,7 @@ def step(group: Group[T, X, M]) -> Generator[M, Any, None]:
         if task:
             group.stack.idle.discard(task)
 
-def spawn(task: Task[None, None]) -> None:
+def spawn(task: Task[None, None]) -> Task[None, None]:
     """
     Executes a given task concurrently with a current task (task that spawned it).
     Spawned task is detached from the task that spawned it and it can outlive it and/or
@@ -665,6 +669,8 @@ def spawn(task: Task[None, None]) -> None:
     `yield from work()` directly instead.
     """
     main(task)
+    return
+    yield
 
 def fork(task: Task[M, T], options: ForkOptions | None = None) -> Fork[T, Exception, M]:
     """
@@ -709,7 +715,6 @@ def conclude(
                 # force the generator to end and return with `result.value`
                 state = task.throw(StopIteration(result.value))
             except StopIteration:
-                yield
                 return
         elif isinstance(result, Failure):
             state = task.throw(result.error)
@@ -722,8 +727,8 @@ def conclude(
             idle.add(task)
         elif state is not None:
             enqueue(task)
-    yield
     return
+    yield
 
 
 def abort(handle: ControllerFork[T, X, M], error: Exception) -> Task[None, None]:
@@ -748,7 +753,7 @@ def exit_(handle: ControllerFork[T, X, M], value: Any) -> Task[None, None]:
     yield from conclude(handle, Success(value))
 
 
-def terminate(handle: Controller[M, None]) -> Task[None, None]:
+def terminate(handle: ControllerFork[None, X, M]) -> Task[None, None]:
     """
     Terminates a task (only for tasks with void return type). If your task has a
     non-`void` return type you should use `exit` instead.
@@ -799,10 +804,11 @@ def group(forks: list[Fork[T, X, M]]) -> Task[Optional[Instruction[M]], None]:
             else:
                 break
     except Exception as error:
-        for task in group.stack.active:
+        # only iterate over a copy of active/idle queue to be safe
+        for task in list(group.stack.active):
             yield from abort(task, error)
 
-        for task in group.stack.idle:
+        for task in list(group.stack.idle):
             yield from abort(task, error)
             enqueue(task)  # `conclude` might add idle tasks back into `idle` queue
 
@@ -1014,11 +1020,12 @@ implementation.
 def with_tag(tag: Tag, value: M) -> Tagged[M]:
     return {"type": tag, tag: value}
 
-def tag(effect: Union[Fork[T, X, M], Tagger[T, X, M]], tag: str) -> Effect[Union[Control, Tagged[M]]]:
+def tag(effect: Union[ControllerFork[T, X, M], Tagger[T, X, M]], tag: str) -> Effect[Union[Control, Tagged[M]]]:
     """
     Tags an effect by boxing each event with an object that has `type` field
     corresponding to the given tag and same named field holding original message e.g
-    given `nums` effect
+    given `nums` effect that produces numbers, `tag(nums, "inc")` would create an effect
+    that produces events like `{"type": "inc", "inc": 1}`
     """
     if effect is NONE_:
         return NONE_  # type: ignore[return-value]
