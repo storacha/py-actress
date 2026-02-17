@@ -687,43 +687,42 @@ class TestCanAbort:
 
         assert output == expect
 
-    # causes other tests after it to timeout
-    # async def test_can_still_do_things_when_aborted(self):
-    #     _logger = create_log()
-    #     output, log = (_logger["output"], _logger["log"],)
-    #
-    #     def worker():
-    #         try:
-    #             log("start worker")
-    #             yield from task.sleep(20)
-    #             log("wake worker")
-    #         except Exception as e:
-    #             log(f"aborted {e}")
-    #             yield from task.sleep(2)
-    #             log("ok bye")
-    #
-    #     def main():
-    #         log("fork worker")
-    #         fork = yield from task.fork(worker())
-    #         log("nap")
-    #         yield from task.sleep(1)
-    #         log("abort worker")
-    #         yield from task.abort(fork, Exception("kill"))
-    #         log("exit main")
-    #
-    #     expect = [
-    #         "fork worker",
-    #         "nap",
-    #         "start worker",
-    #         "abort worker",
-    #         "aborted kill",
-    #         "exit main",
-    #     ]
-    #     await task.fork(main())
-    #     assert output == expect
-    #     await task.fork(task.sleep(10))
-    #     assert output == [*expect] + ["ok bye"]
-    #
+    async def test_can_still_do_things_when_aborted(self):
+        _logger = create_log()
+        output, log = (_logger["output"], _logger["log"],)
+
+        def worker():
+            try:
+                log("start worker")
+                yield from task.sleep(20)
+                log("wake worker")
+            except Exception as e:
+                log(f"aborted {e}")
+                yield from task.sleep(2)
+                log("ok bye")
+
+        def main():
+            log("fork worker")
+            fork = yield from task.fork(worker())
+            log("nap")
+            yield from task.sleep(1)
+            log("abort worker")
+            yield from task.abort(fork, Exception("kill"))
+            log("exit main")
+
+        expect = [
+            "fork worker",
+            "nap",
+            "start worker",
+            "abort worker",
+            "aborted kill",
+            "exit main",
+        ]
+        await task.fork(main())
+        assert output == expect
+        await task.fork(task.sleep(10))
+        assert output == [*expect] + ["ok bye"]
+
     async def test_can_still_suspend_after_aborting(self):
         _logger = create_log()
         output, log = (_logger["output"], _logger["log"],)
@@ -1069,50 +1068,52 @@ class TestEffect:
             )
         )
 
-    # async def test_can_loop(self):
-    #     _logger = create_log()
-    #     output, log = (_logger["output"], _logger["log"],)
-    #
-    #     def step(*, n: int = 0):
-    #         log(f"<< {n}")
-    #         while (n := n - 1) > 0:
-    #             log(f">> {n}")
-    #             yield from task.sleep(n)
-    #             yield from task.send({"n": n})
-    #
-    #     main = await task.fork(task.loop(step(n=4), step))  # type: ignore[arg-type]
-    #     assert sorted(output) == sorted([
-    #         "<< 4",
-    #         ">> 3",
-    #         ">> 2",
-    #         ">> 1",
-    #         "<< 3",
-    #         ">> 2",
-    #         ">> 1",
-    #         "<< 2",
-    #         ">> 1",
-    #         "<< 1",
-    #         "<< 2",
-    #         ">> 1",
-    #         "<< 1",
-    #         "<< 1",
-    #         "<< 1",
-    #     ])
+    async def test_can_loop(self):
+        _logger = create_log()
+        output, log = (_logger["output"], _logger["log"],)
 
-    # async def test_can_wait_in_a_loop(self):
-    #     _logger = create_log()
-    #     output, log = (_logger["output"], _logger["log"],)
-    #
-    #     def msg_func(message):
-    #         log(f"<< {message}")
-    #         result = yield from task.wait(0)
-    #         log(f">> {result}")
-    #         yield
-    #
-    #     main = task.loop(task.send("start"), msg_func)
-    #
-    #     assert (await task.fork(main)) == None
-    #     assert output == ["<< start", ">> 0"]
+        def step(*, n: int = 0):
+            log(f"<< {n}")
+            while (n := n - 1) > 0:
+                log(f">> {n}")
+                yield from task.sleep(n)
+                yield from task.send({"n": n})
+
+        main = await task.fork(task.loop(step(n=4), step))  # type: ignore[arg-type]
+        assert sorted(output) != output
+        assert sorted(output) == sorted([
+            "<< 4",
+            ">> 3",
+            ">> 2",
+            ">> 1",
+            "<< 3",
+            ">> 2",
+            ">> 1",
+            "<< 2",
+            ">> 1",
+            "<< 1",
+            "<< 2",
+            ">> 1",
+            "<< 1",
+            "<< 1",
+            "<< 1",
+        ])
+
+    async def test_can_wait_in_a_loop(self):
+        _logger = create_log()
+        output, log = (_logger["output"], _logger["log"],)
+
+        def msg_func(message):
+            log(f"<< {message}")
+            result = yield from task.wait(0)
+            log(f">> {result}")
+            return
+            yield
+
+        main = task.loop(task.send("start"), msg_func)
+
+        assert (await task.fork(main)) == None
+        assert output == ["<< start", ">> 0"]
 
 
 class TestAllOperator:

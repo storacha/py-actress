@@ -1,5 +1,6 @@
 from __future__ import annotations
 import asyncio
+import weakref
 from dataclasses import dataclass
 from typing import Any, Generic, Literal, NoReturn, Optional, TypeVar, TypedDict, Union, cast, overload
 from collections.abc import Awaitable, Generator, Callable, Iterable
@@ -527,6 +528,11 @@ class Main(Generic[T, X, M]):
 MAIN = Main()
 """Singleton main group"""
 
+# Python generator objects cannot carry arbitrary attributes like in the reference JS
+# implementation, so loop/group helpers store membership here to route resumed generators
+# back to their group.
+_GROUP_MEMBERSHIP: weakref.WeakKeyDictionary[object, Group[Any, Any, Any]] = weakref.WeakKeyDictionary()
+
 
 class TaskGroup(Generic[T, X, M]):
     """Task group for managing concurrent tasks."""
@@ -562,7 +568,10 @@ class TaskGroup(Generic[T, X, M]):
         # since `Generator` objects don't have the `group` attribute if `member`
         # is not a `Fork` then it's group is the default `MAIN` group
         group = getattr(member, 'group', None)
-        return group if group is not None else MAIN
+        if group is not None:
+            return group
+        mapped = _GROUP_MEMBERSHIP.get(member)
+        return cast(Group[T, X, M], mapped if mapped is not None else MAIN)
 
 
     @staticmethod
@@ -570,7 +579,7 @@ class TaskGroup(Generic[T, X, M]):
         try:
             member.group = group  # type: ignore[union-attr]
         except AttributeError:
-            pass
+            _GROUP_MEMBERSHIP[member] = group
         finally:
             group.stack.active.append(member)
 
@@ -718,6 +727,8 @@ def conclude(
                 return
         elif isinstance(result, Failure):
             state = task.throw(result.error)
+            while state is CURRENT:
+                state = task.send(task)
     except Exception:
         pass
     else:
@@ -893,7 +904,12 @@ def loop(init: Effect[M], next_: Callable[[M], Effect[M]]) -> Task[None, None]:
 
     while True:
         for msg in step(group):
-            TaskGroup.enqueue(iter(next_(msg)), group)
+            try:
+                # incase `next` only accepts keyword args
+                effect = next_(**msg)  # type: ignore[arg-type]
+            except TypeError:
+                effect = next_(cast(M, msg))
+            TaskGroup.enqueue(iter(effect), group)
         if Stack.size(group.stack) > 0:
             yield from suspend()
         else:
@@ -1065,4 +1081,3 @@ def effects(tasks: list[Task[None, T]]) -> Effect[Optional[T]]:
         return batch([effect(task) for task in tasks])
     else:
         return NONE_
-
