@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any, Generic, Literal, NoReturn, Optional, TypeVar, TypedDict, Union, cast, overload
 from collections.abc import Awaitable, Generator, Callable, Iterable
 from enum import Enum
-from typing_extensions import TypeAlias
+from typing_extensions import Self, TypeAlias
 
 T = TypeVar("T")  # value of task returned (on success)
 X = TypeVar("X", bound= Exception)  # exception raised by task (failure)
@@ -156,7 +156,7 @@ def sleep(duration: float = 0) -> Task[Control, None]:
         print("I am back to work")
     ```
     """
-    task = yield from current()
+    task: Controller[Any, Any] = yield from current()
     loop = asyncio.get_running_loop()
 
     # convert duration to millisecs
@@ -207,13 +207,13 @@ def wait(input: Union[Awaitable[T], T]) -> Task[Control, T]:
        return json
     ```
     """
-    task = yield from current()
+    task: Controller[Any, Any] = yield from current()
     if is_async(input):
         # no need to track `failed = False` like in reference JS impl because failure
         # can be tracked by only the `Result` object in the `output` variable below
         output: Result[T, Exception] = None  # type: ignore[assignment]
 
-        async def handle_async():
+        async def handle_async() -> None:
             nonlocal output
             try:
                 value = await (cast(Awaitable[T], input))
@@ -250,7 +250,7 @@ def wait(input: Union[Awaitable[T], T]) -> Task[Control, T]:
 
 def wake(task: Task[M, T]) -> Task[None, None]:
     enqueue(task)
-    yield
+    yield None
 
 def main(task: Task[None, None]) -> None:
     """
@@ -374,7 +374,7 @@ class Fork(Future_[T, X], Generic[T, X, M]):
 
     def resume(self) -> Task[None, None]:
         resume(self)
-        yield
+        yield None
 
     def join(self) -> Task[Optional[M], T]:
         return join(self)
@@ -439,7 +439,7 @@ class Fork(Future_[T, X], Generic[T, X, M]):
             # also cast the type for `self.controller` to eliminate the type-checker
             # from inferring that `self.controller` is still `None` after fork
             # activation
-            state = cast(Controller, self.controller).send(None)
+            state = cast(Controller[M, T], self.controller).send(None)
             self._step(state)
             return state
         except StopIteration as e:
@@ -455,7 +455,7 @@ class Fork(Future_[T, X], Generic[T, X, M]):
             # cast the type for `self.controller` to eliminate the type-checker
             # from inferring that `self.controller` is still `None` after fork
             # activation
-            state = cast(Controller, self.controller).send(value)
+            state = cast(Controller[M, T], self.controller).send(value)
             self._step(state)
             return state
         except StopIteration as e:
@@ -471,7 +471,7 @@ class Fork(Future_[T, X], Generic[T, X, M]):
             # also cast the type for `self.controller` to eliminate the type-checker
             # from inferring that `self.controller` is still `None` after fork
             # activation
-            state = cast(Controller, self.controller).throw(error)
+            state = cast(Controller[M, T], self.controller).throw(error)
             self._step(state)
             return state
         except StopIteration as e:
@@ -489,14 +489,14 @@ class Fork(Future_[T, X], Generic[T, X, M]):
             # also cast the type for `self.controller` to eliminate the type-checker
             # from inferring that `self.controller` is still `None` after fork
             # activation
-            cast(Controller, self.controller).throw(StopIteration(value))
+            cast(Controller[M, T], self.controller).throw(StopIteration(value))
         except StopIteration as e:
             self._step(e)
         except Exception as e:
             self._panic(e)  # type: ignore[arg-type]
         else:
             # the controller yielded instead of terminating. therefore enforce close
-            cast(Controller, self.controller).close()
+            cast(Controller[M, T], self.controller).close()
         return value
 
     def close(self) -> None:
@@ -505,7 +505,7 @@ class Fork(Future_[T, X], Generic[T, X, M]):
             # also cast the type for `self.controller` to eliminate the type-checker
             # from inferring that `self.controller` is still `None` after fork
             # activation
-            cast(Controller, self.controller).close()
+            cast(Controller[M, T], self.controller).close()
         except (Exception) as e:
             self._panic(e)  # type: ignore[arg-type]
 
@@ -513,19 +513,19 @@ class Fork(Future_[T, X], Generic[T, X, M]):
         return f"Fork(id={self.id}, status='{self.status}')"
 
 # type alias added for convenience
-TaskFork: TypeAlias = Union[Task, Fork[T, X, M]]
-ControllerFork: TypeAlias = Union[Controller, Fork[T, X, M]]
+TaskFork: TypeAlias = Union[Task, Fork[T, X, M]]  # type: ignore[type-arg]
+ControllerFork: TypeAlias = Union[Controller, Fork[T, X, M]] # type: ignore[type-arg]
 
 class Main(Generic[T, X, M]):
     """Default or Fallback Task Group."""
     def __init__(self) -> None:
         self.status = Status.IDLE
-        self.stack = Stack()
+        self.stack: Stack[T, X, M] = Stack()
         self.id: Literal[0] = 0
         self.parent: Optional[TaskGroup[T, X, M]] = None
 
 
-MAIN = Main()
+MAIN: Main = Main()  # type: ignore[type-arg]
 """Singleton main group"""
 
 # Python generator objects cannot carry arbitrary attributes like in the reference JS
@@ -567,7 +567,7 @@ class TaskGroup(Generic[T, X, M]):
     def of(member: ControllerFork[T, X, M]) -> Group[T, X, M]:
         # since `Generator` objects don't have the `group` attribute if `member`
         # is not a `Fork` then it's group is the default `MAIN` group
-        group = getattr(member, 'group', None)
+        group: Optional[Group[T, X, M]] = getattr(member, 'group', None)
         if group is not None:
             return group
         mapped = _GROUP_MEMBERSHIP.get(member)
@@ -782,8 +782,8 @@ def group(forks: list[Fork[T, X, M]]) -> Task[Optional[Instruction[M]], None]:
     # abort early if there's no work to do
     if len(forks) == 0: return
 
-    self_ = yield from current()
-    group = TaskGroup(self_)
+    self_: Controller[Any, Any] = yield from current()
+    group: TaskGroup[T, X, M] = TaskGroup(self_)
     failure: Optional[Failure[X]] = None
 
     for fork in forks:
@@ -791,7 +791,7 @@ def group(forks: list[Fork[T, X, M]]) -> Task[Optional[Instruction[M]], None]:
         if result is not None:
             # only the first error should be recorded, so `failure` has to be `None`
             if not result.ok and failure is None:
-                failure = cast(Failure, result)
+                failure = cast(Failure, result)  # type: ignore[type-arg]
             continue
         move(fork, group)
 
@@ -898,15 +898,15 @@ def effect(task: Task[None, T]) -> Effect[T]:
     yield from send(message)
 
 def loop(init: Effect[M], next_: Callable[[M], Effect[M]]) -> Task[None, None]:
-    controller = yield from current()
-    group = TaskGroup(controller)
+    controller: Controller[Any, Any] = yield from current()
+    group: TaskGroup[M, Any, Any] = TaskGroup(controller)
     TaskGroup.enqueue(iter(init), group)
 
     while True:
         for msg in step(group):
             try:
                 # incase `next` only accepts keyword args
-                effect = next_(**msg)  # type: ignore[arg-type]
+                effect: Effect[M] = next_(**msg)  # type: ignore[call-arg]
             except TypeError:
                 effect = next_(cast(M, msg))
             TaskGroup.enqueue(iter(effect), group)
@@ -922,9 +922,9 @@ class Tagger(Generic[T, X, M]):
     def __init__(self, tags: list[str], source: Fork[T, X, M]) -> None:
         self.tags = tags
         self.source = source
-        self.controller: Optional[Controller] = None
+        self.controller: Optional[Controller] = None  # type: ignore[type-arg]
 
-    def __iter__(self):
+    def __iter__(self)-> Self:
         if not self.controller:
             self.controller = iter(self.source)
         return self
@@ -933,7 +933,7 @@ class Tagger(Generic[T, X, M]):
         self, state: Union[Instruction[M], StopIteration]
     ) -> Union[Control, Tagged[M]]:
         if isinstance(state, StopIteration):
-            return state.value
+            return state.value  # type: ignore[no-any-return]
         else:
             if state is CURRENT or state is SUSPEND:
                 return state  # type: ignore[return-value]
@@ -942,23 +942,23 @@ class Tagger(Generic[T, X, M]):
                 # mutation as we know nothing else is accessing this value.
                 tagged = state
                 for tag in self.tags:
-                    tagged = with_tag(tag, tagged)
-                return cast(Tagged, tagged)
+                    tagged = with_tag(tag, tagged)  # type: ignore[assignment]
+                return cast(Tagged[M], tagged)
 
     def __next__(self) -> Union[Control, Tagged[M]]:
-        return self.box(next(cast(Fork, self.controller)))
+        return self.box(next(cast(Fork[T, X, M], self.controller)))
 
     def close(self) -> None:
-        cast(Fork, self.controller).close()
+        cast(Fork[T, X, M], self.controller).close()
 
     def send(self, instruction: Instruction[M]) -> Union[Control, Tagged[M]]:
-        return self.box(cast(Fork, self.controller).send(instruction))
+        return self.box(cast(Fork[T, X, M], self.controller).send(instruction))
 
     def throw(self, error: Exception) -> Union[Control, Tagged[M]]:
-        return self.box(cast(Fork, self.controller).throw(error))
+        return self.box(cast(Fork[T, X, M], self.controller).throw(error))
 
     def return_(self, value: T) -> Union[Control, Tagged[T]]:
-        return self.box(cast(Fork, self.controller).return_(value))  # type: ignore[return-value]
+        return self.box(cast(Fork[T, X, M], self.controller).return_(value))  # type: ignore[arg-type, return-value]
 
     def __str__(self) -> str:
         return "TaggedEffect"
@@ -993,7 +993,7 @@ def all_(tasks: Iterable[Task[M, T]]) -> Task[Any, list[T]]:
     an order of the tasks (not the order of completion). If any of the tasks fail all
     the rest are aborted and error is thrown into the calling task.
     """
-    self_ = yield from current()
+    self_: Controller[Any, Any] = yield from current()
     forks: list[Optional[Fork[T, Exception, None]]] = []
     results: list[Optional[T]] = []
     count_ = 0
@@ -1048,19 +1048,19 @@ def tag(effect: Union[ControllerFork[T, X, M], Tagger[T, X, M]], tag: str) -> Ef
     elif isinstance(effect, Tagger):
         return Tagger(tags=(effect.tags + [tag]), source=effect.source)  # type: ignore[return-value]
     else:
-        return Tagger([tag], effect)  # type:ignore[return-value]
+        return Tagger([tag], effect)  # type:ignore[return-value, arg-type]
 
 def listen(sources: dict[Tag, Effect[M]]) -> Effect[Union[Control, Tagged[M]]]:
     """
     Takes several effects and merges them into a single effect of tagged variants so
     that their source could be identified via `type` field.
     """
-    forks: list[Fork] = []
+    forks: list[Fork] = []  # type: ignore[type-arg]
     for entry in sources.items():
         name, eff = entry
         if eff is not NONE_:
             forks.append(
-                (yield from fork(tag(eff, name)))  # type: ignore[arg-type]
+                (yield from fork(tag(eff, name)))
             )
     yield from group(forks) # type: ignore[misc]
 
@@ -1068,9 +1068,9 @@ def batch(effects: list[Effect[T]]) -> Effect[T]:
     """
     Takes several effects and combines them into one effect
     """
-    forks: list[Fork] = []
+    forks: list[Fork] = []  # type: ignore[type-arg]
     for eff in effects:
-        forks.append((yield from fork(eff)))  # type: ignore[arg-type]
+        forks.append((yield from fork(eff)))
     yield from group(forks)  # type: ignore[misc]
 
 def effects(tasks: list[Task[None, T]]) -> Effect[Optional[T]]:
