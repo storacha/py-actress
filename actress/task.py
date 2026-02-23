@@ -1,3 +1,6 @@
+"""Core task/effect scheduler primitives for actress."""
+# pylint: disable=missing-class-docstring,missing-function-docstring,too-many-instance-attributes,global-statement
+
 from __future__ import annotations
 import asyncio
 import weakref
@@ -168,12 +171,12 @@ def sleep(duration: float = 0) -> Task[Control, None]:
         handle.cancel()
 
 @overload
-def wait(input: Awaitable[T]) -> Task[Control, T]: ...
+def wait(value: Awaitable[T]) -> Task[Control, T]: ...
 
 @overload
-def wait(input: T) -> Task[Control, T]: ...
+def wait(value: T) -> Task[Control, T]: ...
 
-def wait(input: Union[Awaitable[T], T]) -> Task[Control, T]:
+def wait(value: Union[Awaitable[T], T]) -> Task[Control, T]:
     """
     Provides equivalent of `await` in async functions. Specifically it takes a value
     that you can `await` on (that is `[T]`, i.e futures, coroutines) and suspends
@@ -208,7 +211,7 @@ def wait(input: Union[Awaitable[T], T]) -> Task[Control, T]:
     ```
     """
     task: Controller[Any, Any] = yield from current()
-    if is_async(input):
+    if is_async(value):
         # no need to track `failed = False` like in reference JS impl because failure
         # can be tracked by only the `Result` object in the `output` variable below
         output: Result[T, Exception] = None  # type: ignore[assignment]
@@ -216,8 +219,8 @@ def wait(input: Union[Awaitable[T], T]) -> Task[Control, T]:
         async def handle_async() -> None:
             nonlocal output
             try:
-                value = await (cast(Awaitable[T], input))
-                output = Success(value)
+                resolved = await (cast(Awaitable[T], value))
+                output = Success(resolved)
             except Exception as error:
                 output = Failure(error)
             enqueue(task)
@@ -232,21 +235,20 @@ def wait(input: Union[Awaitable[T], T]) -> Task[Control, T]:
         # reference implementation
         if isinstance(output, Failure):
             raise output.error
-        else:
-            return output.value
-    else:
-        # this may seem redundant but it is not, by enqueuing this task we allow
-        # scheduler to perform other queued tasks first. This way many race conditions
-        # can be avoided when values are sometimes promises and other times aren't.
-        # unlike `await` however this will resume in the same tick.
+        return output.value
 
-        # when the `wake` task is enqueued in func `main()`, it is enqueued in the `Main`
-        # group. and when executed, it enqueues `task`. thereby maintaining consistency
-        # in suspending immediately while `enqueue(task)` runs async after other tasks
-        # as it similarly happens if `input` was `Awaitable`
-        main(wake(task))
-        yield from suspend()  # suspension happens immediately
-        return cast(T, input)
+    # this may seem redundant but it is not, by enqueuing this task we allow
+    # scheduler to perform other queued tasks first. This way many race conditions
+    # can be avoided when values are sometimes promises and other times aren't.
+    # unlike `await` however this will resume in the same tick.
+    #
+    # when the `wake` task is enqueued in func `main()`, it is enqueued in the `Main`
+    # group. and when executed, it enqueues `task`. thereby maintaining consistency
+    # in suspending immediately while `enqueue(task)` runs async after other tasks
+    # as it similarly happens if `value` was `Awaitable`
+    main(wake(task))
+    yield from suspend()  # suspension happens immediately
+    return cast(T, value)
 
 def wake(task: Task[M, T]) -> Task[None, None]:
     enqueue(task)
@@ -615,11 +617,11 @@ def enqueue(task: ControllerFork[T, X, M]) -> None:
         MAIN.status = Status.ACTIVE
         while True:
             try:
-                for m in step(MAIN):
+                for _ in step(MAIN):
                     pass
                 MAIN.status = Status.IDLE
                 break
-            except:
+            except Exception:
                 # Top level task may crash and throw an error, but given this is a main
                 # group we do not want to interrupt other unrelated tasks, which is why
                 # we discard the error and the task that caused it.
@@ -648,14 +650,13 @@ def step(group: Group[T, X, M]) -> Generator[M, Any, None]:
                     break
                 # if task requested a context (which is usually to suspend itself) pass back
                 # a task reference and continue.
-                elif instruction is CURRENT:
+                if instruction is CURRENT:
                     input_value = task
                     continue
-                else:
-                    # otherwise task sent a message which we yield to the driver and
-                    # continue
-                    input_value = yield instruction  # type: ignore[misc]
-                    continue
+                # otherwise task sent a message which we yield to the driver and
+                # continue
+                input_value = yield instruction  # type: ignore[misc]
+                continue
         except StopIteration:
             # task finished
             pass
@@ -780,7 +781,8 @@ def group(forks: list[Fork[T, X, M]]) -> Task[Optional[Instruction[M]], None]:
     Groups multiple forks together and joins them with current task.
     """
     # abort early if there's no work to do
-    if len(forks) == 0: return
+    if len(forks) == 0:
+        return
 
     self_: Controller[Any, Any] = yield from current()
     group: TaskGroup[T, X, M] = TaskGroup(self_)
@@ -865,7 +867,7 @@ def join(fork: Fork[T, X, M]) -> Task[Optional[Instruction[M]], T]:
     Raises:
         The fork's error if it failed
     """
-    if (fork.status == Status.IDLE):
+    if fork.status == Status.IDLE:
         yield from fork
 
     # if fork didn't complete, process `fork` in the scheduler and block until
@@ -876,8 +878,7 @@ def join(fork: Fork[T, X, M]) -> Task[Optional[Instruction[M]], T]:
     result: Result[T, X] = fork.result  # type: ignore[assignment]
     if isinstance(result, Success):
         return result.value
-    else:
-        raise result.error
+    raise result.error
 
 def send(message: M) -> Effect[M]:
     """
@@ -934,16 +935,16 @@ class Tagger(Generic[T, X, M]):
     ) -> Union[Control, Tagged[M]]:
         if isinstance(state, StopIteration):
             return state.value  # type: ignore[no-any-return]
-        else:
-            if state is CURRENT or state is SUSPEND:
-                return state  # type: ignore[return-value]
-            else:  # tag non-control instructions
-                # Instead of boxing result at each transform step we perform in-place
-                # mutation as we know nothing else is accessing this value.
-                tagged = state
-                for tag in self.tags:
-                    tagged = with_tag(tag, tagged)  # type: ignore[assignment]
-                return cast(Tagged[M], tagged)
+
+        if state is CURRENT or state is SUSPEND:
+            return state  # type: ignore[return-value]
+
+        # tag non-control instructions. Instead of boxing result at each transform
+        # step we perform in-place mutation as we know nothing else is accessing this value.
+        tagged = state
+        for tag in self.tags:
+            tagged = with_tag(tag, tagged)  # type: ignore[assignment]
+        return cast(Tagged[M], tagged)
 
     def __next__(self) -> Union[Control, Tagged[M]]:
         return self.box(next(cast(Fork[T, X, M], self.controller)))
@@ -1045,10 +1046,9 @@ def tag(effect: Union[ControllerFork[T, X, M], Tagger[T, X, M]], tag: str) -> Ef
     """
     if effect is NONE_:
         return NONE_  # type: ignore[return-value]
-    elif isinstance(effect, Tagger):
+    if isinstance(effect, Tagger):
         return Tagger(tags=(effect.tags + [tag]), source=effect.source)  # type: ignore[return-value]
-    else:
-        return Tagger([tag], effect)  # type:ignore[return-value, arg-type]
+    return Tagger([tag], effect)  # type:ignore[return-value, arg-type]
 
 def listen(sources: dict[Tag, Effect[M]]) -> Effect[Union[Control, Tagged[M]]]:
     """
@@ -1079,5 +1079,4 @@ def effects(tasks: list[Task[None, T]]) -> Effect[Optional[T]]:
     """
     if tasks:
         return batch([effect(task) for task in tasks])
-    else:
-        return NONE_
+    return NONE_
