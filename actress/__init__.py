@@ -1,3 +1,7 @@
+"""
+An implementation of actor model of concurrency in Python.
+"""
+
 from .task import (
     Task,
     Effect,
