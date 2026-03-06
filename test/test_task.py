@@ -5,7 +5,7 @@ import json
 import pytest
 
 from actress import task
-from .utils import create_log, inspect, InspectResult
+from .utils import create_log, inspect, InspectorResult
 
 
 @pytest.mark.asyncio
@@ -21,7 +21,7 @@ class TestWait:
         is_sync = False
         result = await fork
 
-        assert result == InspectResult(ok=True, value=5, mail=[], error=None)
+        assert result == InspectorResult(ok=True, value=5, mail=[], error=None)
 
     async def test_wait_on_promise(self):
         is_sync = True
@@ -39,7 +39,7 @@ class TestWait:
         is_sync = False
         result = await fork
 
-        assert result == InspectResult(ok=True, value=5, mail=[], error=None)
+        assert result == InspectorResult(ok=True, value=5, mail=[], error=None)
 
     async def test_lets_you_yield(self):
         def main():
@@ -47,7 +47,7 @@ class TestWait:
             assert value == None, "return None on normal yield"
 
         result = await inspect(main())
-        assert result == InspectResult(value=None, ok=True, mail=[5], error=None)
+        assert result == InspectorResult(value=None, ok=True, mail=[5], error=None)
 
     async def test_throw_on_failed_promises(self):
         boom = Exception("boom!")
@@ -61,7 +61,7 @@ class TestWait:
             return message
 
         result = await inspect(main())
-        assert result == InspectResult(ok=False, value=None, mail=[], error=boom)
+        assert result == InspectorResult(ok=False, value=None, mail=[], error=boom)
 
     async def test_can_catch_promise_errors(self):
         boom = Exception("boom!")
@@ -78,7 +78,7 @@ class TestWait:
                 return e
 
         result = await inspect(main())
-        assert result == InspectResult(ok=True, value=boom, mail=[], error=None)
+        assert result == InspectorResult(ok=True, value=boom, mail=[], error=None)
 
     async def test_can_intercept_thrown_errors(self):
         boom = Exception("boom!")
@@ -90,7 +90,7 @@ class TestWait:
             return fail()
 
         result = await inspect(main())
-        assert result == InspectResult(ok=False, mail=[], error=boom, value=None)
+        assert result == InspectorResult(ok=False, mail=[], error=boom, value=None)
 
     async def test_can_catch_thrown_errors(self):
         boom = Exception("boom!")
@@ -105,7 +105,7 @@ class TestWait:
                 return e
 
         result = await inspect(main())
-        assert result == InspectResult(ok=True, mail=[], value=boom, error=None)
+        assert result == InspectorResult(ok=True, mail=[], value=boom, error=None)
 
     async def test_use_finally(self):
         boom = Exception("boom!")
@@ -124,7 +124,7 @@ class TestWait:
                 finalized = True
 
         result = await inspect(main())
-        assert result == InspectResult(ok=False, mail=[], error=boom, value=None)
+        assert result == InspectorResult(ok=False, mail=[], error=boom, value=None)
         assert finalized == True
 
 
@@ -136,7 +136,7 @@ class TestMessaging:
             yield from task.send("two")
 
         result = await inspect(main())
-        assert result == InspectResult(value=None, ok=True, mail=["one", "two"], error=None)
+        assert result == InspectorResult(value=None, ok=True, mail=["one", "two"], error=None)
 
     async def test_can_send_message_in_finally(self):
         def main():
@@ -147,7 +147,7 @@ class TestMessaging:
                 yield from task.send("three")
 
         result = await inspect(main())
-        assert result == InspectResult(value=None, ok=True, mail=["one", "two", "three"], error=None)
+        assert result == InspectorResult(value=None, ok=True, mail=["one", "two", "three"], error=None)
 
     async def test_can_send_message_after_exception(self):
         boom = Exception("boom!")
@@ -161,7 +161,7 @@ class TestMessaging:
                 yield from task.send("four")
 
         result = await inspect(main())
-        assert result == InspectResult(value=None, ok=False, mail=["one", "two", "four"], error=boom)
+        assert result == InspectorResult(value=None, ok=False, mail=["one", "two", "four"], error=boom)
 
     async def test_can_send_message_after_rejected_promise(self):
         boom = Exception("boom!")
@@ -180,7 +180,7 @@ class TestMessaging:
                 yield from task.send("four")
 
         result = await(inspect(main()))
-        assert result == InspectResult(ok=False, error=boom, value=None, mail=["one", "two", "four"])
+        assert result == InspectorResult(ok=False, error=boom, value=None, mail=["one", "two", "four"])
 
     async def test_can_send_message_before_rejected_promise_in_finally(self):
         boom = Exception("boom!")
@@ -205,7 +205,7 @@ class TestMessaging:
                 yield from task.send("four")
 
         result = await(inspect(main()))
-        assert result == InspectResult(ok=False, error=oops, value=None, mail=["one", "two"])
+        assert result == InspectorResult(ok=False, error=oops, value=None, mail=["one", "two"])
 
     async def test_subtasks_can_send_messages(self):
         oops = Exception("oops")
@@ -229,7 +229,7 @@ class TestMessaging:
                 yield from task.send("five")
 
         result = await inspect(main())
-        assert result == InspectResult(
+        assert result == InspectorResult(
             ok=False, mail=["one", "two", "c1", "three", "four"], value = None, error=oops
         )
 
@@ -250,7 +250,7 @@ class TestSubtasks:
             return two
 
         result = await inspect(main())
-        assert result == InspectResult(ok=False, value=None, mail=[], error=err)
+        assert result == InspectorResult(ok=False, value=None, mail=[], error=err)
 
     async def test_fork_does_not_crash_parent(self):
         boom = Exception("boom")
@@ -284,7 +284,7 @@ class TestSubtasks:
             return (yield from task.wait(promise_2))
 
         result = await inspect(main())
-        assert result == InspectResult(ok=True, value="two", mail=[], error=None)
+        assert result == InspectorResult(ok=True, value="two", mail=[], error=None)
         assert output == ["start A", "start B"]
 
 
@@ -325,7 +325,7 @@ class TestSubtasks:
             return 0
 
         result = await inspect(main())
-        expected = InspectResult(
+        expected = InspectorResult(
             ok=False, value=None, error=Exception("A!boom"), mail=["hi", "B#1"]
         )
         assert result["ok"] == expected["ok"]
@@ -362,7 +362,7 @@ class TestSubtasks:
 
         result = await inspect(main())
 
-        assert result == InspectResult(ok=True, value=None, mail=["hi", "B#1"], error=None)
+        assert result == InspectorResult(ok=True, value=None, mail=["hi", "B#1"], error=None)
         assert output == ["Start A", "Start B"]
 
     async def test_failing_group_member_terminates_group(self):
@@ -400,7 +400,7 @@ class TestSubtasks:
 
         assert (
             ((await inspect(main()))) ==
-            InspectResult(ok=True, value=boom, mail=[], error=None)
+            InspectorResult(ok=True, value=boom, mail=[], error=None)
         )
         assert sorted(output) == sorted([
             "A on duty",
@@ -442,7 +442,7 @@ class TestSubtasks:
 
         assert (
             ((await inspect(main()))) ==
-            InspectResult(ok=False, value=None, mail=[], error=boom)
+            InspectorResult(ok=False, value=None, mail=[], error=boom)
         )
         await task.fork(task.sleep(10))
         assert output == ["a on duty", "a cancelled"]
@@ -452,7 +452,7 @@ class TestSubtasks:
             return (yield from task.group([]))
         assert (
             (await inspect(main())) ==
-            InspectResult(ok=True, value=None, error=None, mail=[])
+            InspectorResult(ok=True, value=None, error=None, mail=[])
         )
 
 
@@ -544,7 +544,7 @@ class TestConcurrency:
             yield from task.join(worker)
 
         result = await inspect(main())
-        assert result == InspectResult(ok=False, error=boom, value=None, mail=[])
+        assert result == InspectorResult(ok=False, error=boom, value=None, mail=[])
 
     async def test_spawn_can_outlive_parent(self):
         _logger = create_log()
@@ -583,7 +583,7 @@ class TestConcurrency:
             yield from task.sleep()
             yield from task.exit_(worker, None)
 
-        assert (await inspect(main())) == InspectResult(ok=True, value=None, mail=[], error=None)
+        assert (await inspect(main())) == InspectorResult(ok=True, value=None, mail=[], error=None)
 
 
 class TestCanAbort:
@@ -867,7 +867,7 @@ class TestTag:
             yield from task.send(2)
 
         result = await inspect(task.tag(fx(), "fx"))
-        assert result == InspectResult(
+        assert result == InspectorResult(
             ok=True, value=None, error=None, mail=[
                 {"type": "fx", "fx": 1},
                 {"type": "fx", "fx": 2},
@@ -884,7 +884,7 @@ class TestTag:
             yield from task.tag(fx(), "fx")
 
         result = await inspect(main())
-        assert result == InspectResult(
+        assert result == InspectorResult(
             ok=False, error=error, value=None, mail=[{"type": "fx", "fx": 1}]
         )
 
@@ -905,7 +905,7 @@ class TestTag:
             yield from task.terminate(fork)
 
         result = await inspect(main())
-        assert result == InspectResult(ok=True, value=None, error=None, mail=[])
+        assert result == InspectorResult(ok=True, value=None, error=None, mail=[])
         assert output == ["send 1"]
         await task.fork(task.sleep(5))
         assert output == ["send 1"]
@@ -929,7 +929,7 @@ class TestTag:
             yield from task.abort(fork, Exception("kill"))
 
         result = await inspect(main())
-        assert result == InspectResult(ok=True, value=None, error=None, mail=[])
+        assert result == InspectorResult(ok=True, value=None, error=None, mail=[])
         assert output == ["send 1"]
         await task.fork(task.sleep(5))
         assert output == ["send 1"]
@@ -943,7 +943,7 @@ class TestTag:
         tagged = task.tag(task.tag(fx(), "foo"), "bar")
         assert (
             (await inspect(tagged)) ==
-            InspectResult(
+            InspectorResult(
                 ok=True,
                 value=None,
                 mail=[
@@ -963,7 +963,7 @@ class TestTag:
         tagged = task.tag(task.tag(task.none_(), "foo"), "bar")
         assert (
             (await inspect(tagged)) ==
-            InspectResult(ok=True, value=None, mail=[], error=None)
+            InspectorResult(ok=True, value=None, mail=[], error=None)
         )
 
 
@@ -1004,7 +1004,7 @@ class TestEffect:
     async def test_can_listen_to_none(self):
         assert (
             (await inspect(task.listen({}))) ==
-            InspectResult(ok=True, value=None, mail=[], error=None)
+            InspectorResult(ok=True, value=None, mail=[], error=None)
         )
 
     async def test_can_produce_no_messages_on_empty_tasks(self):
@@ -1020,7 +1020,7 @@ class TestEffect:
 
         assert (
             (await inspect(main)) ==
-            InspectResult(ok=True, value=None, mail=[], error=None)
+            InspectorResult(ok=True, value=None, mail=[], error=None)
         )
 
     async def test_can_turn_task_into_effect(self):
@@ -1033,7 +1033,7 @@ class TestEffect:
 
         assert (
             (await inspect(fx)) ==
-            InspectResult(ok=True, value=None, mail=["hi"], error=None)
+            InspectorResult(ok=True, value=None, mail=["hi"], error=None)
         )
 
     async def test_can_turn_multiple_tasks_into_effect(self):
@@ -1043,7 +1043,7 @@ class TestEffect:
 
         effect = task.effects([fx("foo", 5), fx("bar", 1), fx("baz", 2)])
         assert (
-            (await inspect(effect)) == InspectResult(
+            (await inspect(effect)) == InspectorResult(
                 ok=True, value=None, mail=["bar", "baz", "foo"], error=None
             )
         )
@@ -1051,7 +1051,7 @@ class TestEffect:
     async def test_can_turn_zero_tasks_into_effect(self):
         effect = task.effects([])
         assert (
-            (await inspect(effect)) == InspectResult(
+            (await inspect(effect)) == InspectorResult(
                 ok=True, value=None, mail=[], error=None
             )
         )
@@ -1063,7 +1063,7 @@ class TestEffect:
 
         effect = task.batch([fx("foo", 5), fx("bar", 1), fx("baz", 2)])
         assert (
-            (await inspect(effect)) == InspectResult(
+            (await inspect(effect)) == InspectorResult(
                 ok=True, value=None, mail=["bar", "baz", "foo"], error=None
             )
         )
@@ -1260,7 +1260,7 @@ class TestForkAPI:
             return result
 
         result = await inspect(main())
-        assert result == InspectResult(ok=True, value=0, mail=["b"], error=None)
+        assert result == InspectorResult(ok=True, value=0, mail=["b"], error=None)
 
     async def test_has_to_string_tag(self):
         fork_data_dict = {}
@@ -1293,6 +1293,6 @@ class TestForkAPI:
         def main():
             yield from task.join(worker)
 
-        assert (await inspect(main())) == InspectResult(
+        assert (await inspect(main())) == InspectorResult(
             mail=["hi"], ok=True, value=None, error=None
         )

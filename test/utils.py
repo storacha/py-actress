@@ -1,4 +1,5 @@
-from typing import Callable, Generic, Optional, TypedDict, cast
+from typing import Callable, Generic, Optional, cast
+from typing_extensions import TypedDict  # for backwards compatibility with python3.10
 from actress.task import T, M, Control, Fork, Task, fork, is_instruction
 
 
@@ -16,14 +17,14 @@ def create_log() -> Logger:
     return Logger(output=output, log=log)
 
 
-class InspectResult(TypedDict, Generic[M, T]):
+class InspectorResult(TypedDict, Generic[M, T]):
     ok: bool
     value: Optional[T]
     mail: list[M]  # Messages sent by task
     error: Optional[Exception]
 
 
-def inspector(task: Task[M, T]) -> Task[Control, InspectResult[M, T]]:
+def inspector(task: Task[M, T]) -> Task[Control, InspectorResult[M, T]]:
     mail: list[M] = []
     controller = iter(task)
     input = None
@@ -32,7 +33,7 @@ def inspector(task: Task[M, T]) -> Task[Control, InspectResult[M, T]]:
             try:
                 step = controller.send(input)
             except StopIteration as e:
-                return InspectResult(ok=True, value=e.value, mail=mail, error=None)
+                return InspectorResult(ok=True, value=e.value, mail=mail, error=None)
             else:
                 instruction = step
                 if is_instruction(instruction):
@@ -41,7 +42,7 @@ def inspector(task: Task[M, T]) -> Task[Control, InspectResult[M, T]]:
                     print(f"Message yielded: {instruction}")
                     mail.append(cast(M, instruction))
     except Exception as e:
-        return InspectResult(ok=False, value=None, error=e, mail=mail)
+        return InspectorResult(ok=False, value=None, error=e, mail=mail)
 
-def inspect(task: Task[M, T]) -> Fork[InspectResult[M, T], Exception, Control]:
+def inspect(task: Task[M, T]) -> Fork[InspectorResult[M, T], Exception, Control]:
     return fork(inspector(task))
